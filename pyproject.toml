@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hopfec"
+version = "0.1.0"
+description = "Whole-brain effective connectivity from resting-state fMRI with linear and non-linear Hopf whole-brain models (BIDS/fMRIPrep/HALFpipe inputs, DWI or normative structural connectivity)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "quant-engine / hopfec contributors"}]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=1.5",
+    "nibabel>=5.0",
+    "nilearn>=0.10",
+    "joblib>=1.2",
+    "PyYAML>=6.0",
+    "matplotlib>=3.6",
+    "h5py>=3.7",
+]
+
+[project.optional-dependencies]
+fast = ["numba>=0.57"]
+tractography = ["dipy>=1.7", "templateflow>=23.0"]
+all = ["numba>=0.57", "dipy>=1.7", "templateflow>=23.0", "pytest>=7"]
+
+[project.scripts]
+hopfec = "hopfec.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["hopfec*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

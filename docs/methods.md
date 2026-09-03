@@ -1,0 +1,98 @@
+# Methods
+
+## Empirical statistics (per participant, averaged over runs)
+
+* band-pass (2nd-order Butterworth, zero phase) `model.filter_band` (default 0.008–0.08 Hz);
+* `FC = corr(x)`; lagged correlation `COVtau[i,j] = <x_i(t+τ) x_j(t)> / (σ_i σ_j)` with
+  `τ = model.tau_tr` TRs (entry (i,j) > 0: j leads i);
+* node frequencies `f_j` = peak of the Gaussian-smoothed power spectrum in `model.freq_band`;
+  group spectra are averaged before taking the peak;
+* FCD distribution (sliding windows) and metastability (SD of the Kuramoto order parameter) for the
+  `fcd_ks` / `meta_diff` search metrics.
+
+## Hopf whole-brain model (Deco et al. 2017)
+
+```
+dz_j/dt = (a_j + i ω_j − |z_j|²) z_j + G Σ_k C_jk (z_k − z_j) + β η_j(t),   x_j = Re z_j
+```
+`a = -0.02`, `β = 0.02`, `C` scaled to max 0.2, Euler–Maruyama with `dt ≤ 0.1 s` (the step is reduced
+automatically so that `dt (|a| + G s_j + ω_j) ≤ 0.25`), sampled every TR after a transient, then
+filtered like the data.  The numba kernel simulates ~10⁴ steps/s per 100 nodes.
+
+## Linear Hopf model (Ponce-Alvarez & Deco 2024) and filter-consistent moments
+
+Around `z = 0` (valid for `a < 0`) the model is `dX = A X dt + β dW` with
+`A = [[diag(a − G s) + G C, −diag(ω)], [diag(ω), diag(a − G s) + G C]]`.  The stationary covariance
+solves `A Σ + Σ Aᵀ + β² I = 0` and `Cov(X(t+τ), X(t)) = expm(A τ) Σ`.  Because empirical BOLD is
+band-pass filtered, the model's TR-sampled covariance sequence is convolved with the filter's
+autocorrelation `h2` (impulse response of `filtfilt`): `Σ_filt(τ) = Σ_m h2(m) c(τ − m)`, `c(k) =
+expm(A k TR) Σ` — computed via an eigendecomposition (fast, used in the parameter search) or via the
+recursion `c(k) = P c(k−1)` (used for gradients).  Verified against long simulations (corr > 0.99).
+
+## Estimating effective connectivity
+
+**Exact-gradient fit (linear model, default, `model.linear.method: gradient`)**
+Loss `L = ½ w_fc Σ_{i≠j}(FC_sim − FC_emp)² + ½ w_τ Σ_ij (COVtau_sim − COVtau_emp)² [+ λ_sc/2 ‖C − C_prior‖²
++ λ_l1 Σ C]`; gradients w.r.t. `C`, `a` and `ω` by the adjoint method (back-propagation through the lag
+recursion, the adjoint Fréchet derivative of `expm`, and the adjoint Lyapunov equation); L-BFGS-B with
+`C ≥ 0` on the allowed links (structural links + homotopic pairs by default, `model.gec.mask`).  `G` is
+absorbed in `C`: the initial value is `G* · SC` from the search; the output `EC` is in these units and
+`ECnorm` is rescaled to max 0.2 (`G_eff = max(EC)/0.2`).  Node frequencies are co-estimated by default
+(`fit_omega: true`, initialised from spectral peaks) because errors in ω create spurious lagged
+asymmetries.
+
+**Heuristic GEC iteration (`method: gec`, and always for the non-linear model)**
+`C_ij ← C_ij + ε_FC (FC_emp − FC_sim)_ij + ε_τ (COVtau_emp − COVtau_sim)_ij`, `C ≥ 0`, rescaled to
+max 0.2, best iterate kept, stop after `patience` non-improving iterations (Deco, Kringelbach et al.
+2019–2021).  The non-linear fit is initialised from the linear EC (`model.nonlinear.init: linear`) and
+averages `n_sim` simulations per iteration.
+
+### Validation on synthetic ground truth (N = 20, 8 "participants" × 600 volumes, TR 2 s)
+
+| estimator | corr(EC, C_true) | corr of antisymmetric parts (direction) |
+|---|---|---|
+| structural prior (symmetrised truth) | 0.52 | – |
+| heuristic GEC, linear moments | 0.43 | −0.07 |
+| heuristic GEC, non-linear simulations | 0.42 | −0.08 |
+| exact gradient, ω known | 0.67 | 0.63 |
+| exact gradient, ω from spectral peaks | 0.27 | 0.13 |
+| exact gradient, ω co-estimated (default) | **0.77** | **0.74** |
+| exact gradient on noise-free model moments | 0.99 | 0.99 |
+
+The heuristic rule improves the FC fit but does not recover the direction of coupling in this setting
+(its lagged-covariance asymmetry is dominated by frequency differences); the exact-gradient linear
+estimator does.  Reproduce with `tests/test_models.py::test_gradient_fit_recovers_truth` and the
+scripts in the repository history.
+
+## Parameter search / error surface
+
+`model.search.G` (and optionally `model.search.a`) define the grid; the homogeneous model `C = SC` is
+evaluated at every point in parallel (`joblib`); metrics: `fit_rmse` (default), `fc_corr`, `fc_rmse`,
+`tau_rmse`, `fcd_ks` (KS distance of FCD distributions, needs simulation), `meta_diff`, `combined`.
+Outputs: long table, 2-D surface TSV/NPZ per metric, PNG, `*_desc-search.json` with the optimum.
+`search.level: group | participant | both` chooses whose FC is used.
+
+## Group level
+
+* fit to the group-average FC/COVtau/spectra with the group-average SC (`group.fit_group_average`);
+* mean and SD of participant ECs (`group.mean_of_participants`);
+* `group-all` pools everybody; per-group outputs for each label in `participants.tsv`;
+* pairwise edge-wise Welch t-tests with Benjamini–Hochberg FDR (`group.compare`, `group.fdr_q`),
+  optional permutation FWE (`group.n_perm`), plus global strength/asymmetry tests.
+
+## References
+
+* Deco G, Kringelbach ML, Jirsa VK, Ritter P (2017) The dynamics of resting fluctuations in the brain:
+  metastability and its dynamical cortical core. *Sci Rep* 7:3095.
+* Ponce-Alvarez A, Deco G (2024) The Hopf whole-brain model and its linear approximation. *Sci Rep*
+  14:2615.
+* Deco G, Cruzat J, Cabral J, Tagliazucchi E, Laufs H, Logothetis NK, Kringelbach ML (2019)
+  Awakening: predicting external stimulation to force transitions between different brain states.
+  *PNAS* 116:18088.
+* Deco G, Sanz Perl Y, Vuust P, Tagliazucchi E, Kennedy H, Kringelbach ML (2021) Rare long-range
+  cortical connections enhance human information processing. *Curr Biol* 31:4436.
+* Elias GJB et al. (2024) A large normative connectome for exploring the tractographic correlates of
+  focal brain interventions. *Sci Data* 11:353.
+* Esteban O et al. (2019) fMRIPrep: a robust preprocessing pipeline for functional MRI. *Nat Methods*.
+* Lindquist MA et al. (2019) Modular preprocessing pipelines can reintroduce artifacts into fMRI data.
+  *Hum Brain Mapp* 40:2358.
