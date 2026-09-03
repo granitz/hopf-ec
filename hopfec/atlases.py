@@ -152,6 +152,14 @@ def read_label_table(path: str | Path) -> pd.DataFrame:
         out = out.dropna(subset=["index"])
         out["index"] = out["index"].astype(int)
         return out.reset_index(drop=True)
+    # Connectome Workbench label list: name on one line, "key R G B A" on the next
+    if len(lines) >= 2 and len(lines) % 2 == 0 and all(re.fullmatch(r"\s*\d+(\s+\d+){3,4}\s*", lines[i]) for i in range(1, len(lines), 2)) \
+            and not any(re.fullmatch(r"\s*\d+(\s+\S+)+\s*", lines[i]) and re.fullmatch(r"-?\d+", lines[i].split()[0]) for i in range(0, len(lines), 2)):
+        rows = [(int(lines[i + 1].split()[0]), lines[i].strip()) for i in range(0, len(lines), 2)]
+        out = pd.DataFrame(rows, columns=["index", "name"])
+        out["hemisphere"] = [infer_hemisphere(n) for n in out["name"]]
+        out["network"] = ""
+        return out.sort_values("index").reset_index(drop=True)
     # FreeSurfer LUT or plain list
     rows = []
     for k, ln in enumerate(lines, start=1):
@@ -296,7 +304,7 @@ def select_atlas(atlas_dir: str | Path | None, name: str | None = None, file: st
                  labels: str | Path | None = None, prefer_space: str | None = None) -> Atlas:
     """Pick one atlas: explicit file, or by name (exact, regex or normalised substring) within atlas_dir."""
     if file:
-        return atlas_from_file(file, labels=labels)
+        return atlas_from_file(file, labels=labels, name=name)
     if atlas_dir is None:
         raise ValueError("either atlas.file or paths.atlas_dir must be set")
     atlases = scan_atlas_dir(atlas_dir)
