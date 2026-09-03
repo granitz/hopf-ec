@@ -21,8 +21,14 @@ LABELS = {116: ROOT / "data/Tian_atlas/schaefertian100/SchaeferTian116.tsv", 216
           416: ROOT / "data/Tian_atlas/SchaeferTian416.txt"}
 
 
+def slug(s: str) -> str:
+    import re
+
+    return re.sub(r"[^A-Za-z0-9]", "", s)[:60]
+
+
 def load(d: Path, name: str, weight: str = "count"):
-    f = d / f"atlas-{name}_desc-normative_weight-{weight}_connectivity.tsv"
+    f = d / f"atlas-{slug(name)}_desc-normative_weight-{weight}_connectivity.tsv"
     return load_matrix(f) if f.exists() else None
 
 
@@ -48,7 +54,7 @@ for n in (116, 216, 416):
     print(f"\n===== SchaeferTian{n} =====")
     for space in ("MNI152NLin6Asym", "MNI152NLin2009cAsym"):
         name = f"SchaeferTian{n}-{space}"
-        js = LAS / f"atlas-{name}_desc-normative_connectivity.json"
+        js = LAS / f"atlas-{slug(name)}_desc-normative_connectivity.json"
         if js.exists():
             s = json.loads(js.read_text())
             print(f"  LAS {space:20s}: streamlines connecting>=2 parcels {s.get('n_connecting_streamlines'):,}  density {s['density']:.3f}  empty nodes {s['empty_nodes']}  "
