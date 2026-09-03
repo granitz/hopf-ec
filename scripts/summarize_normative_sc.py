@@ -38,10 +38,12 @@ def corr(A, B):
 
 
 def swap_perm(n: int):
+    """Permutation swapping exact left/right homologues.  Only Tian-style names (HIP-lh / HIP-rh) are
+    true homologues; Schaefer parcel numbers are not homotopic, so those are left untouched."""
     t = read_label_table(LABELS[n])
     keys: dict = {}
     for i, (nm, h) in enumerate(zip(t["name"], t["hemisphere"])):
-        if h in ("L", "R"):
+        if h in ("L", "R") and not str(nm).startswith("7Networks"):
             keys.setdefault(homotopic_key(nm), {})[h] = i
     perm = np.arange(n)
     for d in keys.values():
@@ -66,4 +68,8 @@ for n in (116, 216, 416):
         print(f"  6Asym vs 2009cAsym atlas (both LAS): corr(log counts) = {corr(A6, A9):.3f}")
     if A9 is not None and R9 is not None:
         perm = swap_perm(n)
-        print(f"  LAS vs RAS (2009cAsym atlas): corr = {corr(A9, R9):.3f};  after swapping L/R homologues in the RAS build: {corr(A9, R9[np.ix_(perm, perm)]):.3f}")
+        sub = np.arange(16)
+        S_las, S_ras = A9[np.ix_(sub, sub)], R9[np.ix_(sub, sub)]
+        S_ras_sw = R9[np.ix_(perm, perm)][np.ix_(sub, sub)]
+        print(f"  LAS vs RAS (2009cAsym atlas), whole matrix: corr = {corr(A9, R9):.3f} (a mirrored near-symmetric connectome still correlates highly)")
+        print(f"  subcortex block (16 Tian regions, exact homologues): LAS vs RAS corr = {corr(S_las, S_ras):.3f};  LAS vs RAS-with-L/R-swapped = {corr(S_las, S_ras_sw):.3f}")

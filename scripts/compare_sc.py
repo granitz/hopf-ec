@@ -34,7 +34,8 @@ def main():
     iu = np.triu_indices(n, 1)
 
     def corr(X, Y):
-        x, y = np.log1p(X[iu]), np.log1p(Y[iu])
+        k = np.triu_indices(X.shape[0], 1)
+        x, y = np.log1p(X[k]), np.log1p(Y[k])
         return float(np.corrcoef(x, y)[0, 1])
 
     print(f"n = {n}; density A {np.count_nonzero(A[iu]) / len(iu[0]):.3f}, B {np.count_nonzero(B[iu]) / len(iu[0]):.3f}")
@@ -44,15 +45,22 @@ def main():
         names, hemi = list(t["name"]), list(t["hemisphere"])
         keys: dict = {}
         for i, (nm, h) in enumerate(zip(names, hemi)):
-            if h in ("L", "R"):
+            # only exact homologues (e.g. Tian HIP-lh/HIP-rh); Schaefer parcel numbers are not homotopic
+            if h in ("L", "R") and not str(nm).startswith("7Networks"):
                 keys.setdefault(homotopic_key(nm), {})[h] = i
         perm = np.arange(n)
         for d in keys.values():
             if "L" in d and "R" in d:
                 perm[d["L"]], perm[d["R"]] = d["R"], d["L"]
         Bs = B[np.ix_(perm, perm)]
-        print(f"corr after swapping L/R homologues in B = {corr(A, Bs):.4f}  ({int((perm != np.arange(n)).sum())} regions swapped)")
-        if corr(A, Bs) > corr(A, B) + 0.02:
+        sw = np.where(perm != np.arange(n))[0]
+        if len(sw) == 0:
+            print("no exact left/right homologue pairs in the label table; swap test skipped")
+            return
+        blk = np.ix_(sw, sw)
+        c0, c1 = corr(A[blk], B[blk]), corr(A[blk], Bs[blk])
+        print(f"block of {len(sw)} exact homologues: corr(A, B) = {c0:.4f}; corr(A, B with L/R swapped) = {c1:.4f}")
+        if c1 > c0 + 0.02:
             print("=> B looks LEFT-RIGHT MIRRORED relative to A")
 
 
