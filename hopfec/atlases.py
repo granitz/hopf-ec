@@ -127,7 +127,11 @@ def read_label_table(path: str | Path) -> pd.DataFrame:
         raise ValueError(f"empty label file {path}")
     sep = "\t" if "\t" in lines[0] else ("," if path.suffix.lower() == ".csv" or "," in lines[0] else None)
     df = None
+    first_tok = lines[0].split(sep)[0].strip() if sep else lines[0].split()[0]
+    headerless = re.fullmatch(r"-?\d+", first_tok) is not None and sep is None
     try:
+        if headerless:
+            raise ValueError("no header")
         df = pd.read_csv(path, sep=sep, engine="python", comment="#", dtype=str)
         if df.shape[1] < 2:
             df = None
