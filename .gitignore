@@ -10,3 +10,5 @@ derivatives/
 *.log
 .DS_Store
 .cache/
+data/*
+!data/README.md

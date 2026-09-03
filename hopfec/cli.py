@@ -145,7 +145,20 @@ def cmd_timeseries(args):
 def cmd_sc(args):
     from .stages import get_atlas, load_participants, run_normative_stage, run_qsirecon_stage, run_tractography_stage
 
-    cfg = _setup(args)
+    cfg = _setup(args, need_config=args.kind != "orientation" or not args.connectome)
+    if args.kind == "orientation":
+        from .sc.normative import run_orientation_check
+
+        conn = args.connectome or cfg_get(cfg, "paths.normative_connectome")
+        if not conn:
+            raise SystemExit("give --connectome FILE (dTOR_fibers_vox_2_mm.mat[.gz]) or set paths.normative_connectome")
+        work = Path(cfg_get(cfg, "paths.work_dir") or "work") / "normative"
+        ncfg = dict(cfg_get(cfg, "sc.normative", {}))
+        ncfg.setdefault("template_dir", cfg_get(cfg, "paths.template_dir"))
+        d = run_orientation_check(conn, work, ncfg, out_json=work / "orientation_check.json")
+        print(json.dumps(d, indent=2, default=str))
+        print(f"\n=> best convention: {d['best']}  (confident: {d['confident']}, margin in density-WM correlation {d['margin_wm_correlation']:.3f})")
+        return
     atlas = get_atlas(cfg)
     if args.kind == "normative":
         if args.connectome:
@@ -257,7 +270,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_timeseries)
 
     s = sub.add_parser("sc", help="structural connectivity: normative (dTOR-985), tractography (MRtrix3/DIPY) or qsirecon")
-    s.add_argument("kind", choices=["normative", "tractography", "qsirecon"])
+    s.add_argument("kind", choices=["normative", "tractography", "qsirecon", "orientation"],
+                   help="orientation = RAS/LAS check of a fibers_vox file only (no atlas needed)")
     s.add_argument("--connectome", help="dTOR_fibers_vox_2_mm.mat(.gz) (normative)")
     s.add_argument("--fiber-grid", choices=["auto", "RAS", "LAS"], help="voxel-index convention of fibers_vox (normative)")
     s.add_argument("--execute", action="store_true", help="run the tractography (else only write scripts)")

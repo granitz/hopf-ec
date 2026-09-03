@@ -391,6 +391,36 @@ def warp_atlas_to_fiber_space(atlas: Atlas, work_dir: Path, mode: str = "auto") 
     return atlas_from_file(out, labels=atlas.labels_file, name=atlas.name)
 
 
+def run_orientation_check(connectome: str | Path, work_dir: str | Path, cfg: dict | None = None, out_json: str | Path | None = None) -> dict:
+    """Stand-alone orientation check of a fibers_vox file (no atlas needed).
+
+    Computes the streamline density in the fiber grid (writing the point cache for later SC builds)
+    and scores the RAS / LAS voxel-index conventions against MNI152NLin6Asym template maps."""
+    cfg = dict(cfg or {})
+    work_dir = ensure_dir(work_dir)
+    mat = resolve_connectome_file(connectome, work_dir)
+    store = FiberStore(mat, cfg.get("var_name"), cache_dir=work_dir if cfg.get("cache", True) else None)
+    t0 = time.time()
+    dens = streamline_density(store, int(cfg.get("chunk_size", 100_000)))
+    np.save(work_dir / "streamline_density_fibergrid.npy", dens)
+    maps = _template_maps(cfg.get("brain_mask"), cfg.get("wm_probseg"), cfg.get("template_dir"))
+    if not maps:
+        raise RuntimeError("no template maps found (TemplateFlow cache, $FSLDIR or sc.normative.brain_mask/wm_probseg)")
+    diag = diagnose_orientation(dens, maps)
+    total = float(dens.sum())
+    inside_grid = {"n_streamlines": store.n_streamlines, "n_points_in_grid": int(total),
+                   "n_points_total": int(store.meta.get("n_points", total)) if store.meta else None,
+                   "coordinate_range": [store.meta.get("min"), store.meta.get("max")] if store.meta else None,
+                   "integer_coordinates": store.meta.get("integer_coordinates") if store.meta else None}
+    # left/right asymmetry of the density itself (voxel index axis): informative but convention-free
+    x_profile = dens.sum(axis=(1, 2))
+    diag.update({"file": str(mat), "elapsed_s": time.time() - t0, "streamlines": inside_grid,
+                 "density_x_profile_first_half_fraction": float(x_profile[: len(x_profile) // 2].sum() / max(total, 1))})
+    if out_json:
+        save_json(out_json, diag)
+    return diag
+
+
 # --------------------------------------------------------------------------- main builder
 def build_normative_sc(atlas: Atlas, connectome: str | Path, out_dir: str | Path, cfg: dict | None = None,
                        work_dir: str | Path | None = None, atlas_grid_override: np.ndarray | None = None) -> dict:

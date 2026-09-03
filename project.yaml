@@ -1,0 +1,112 @@
+# hopfec configuration.  All paths may use ${ENV_VAR}, ${ENV_VAR:-default} and ~ ;
+# relative paths are resolved against `paths.root` (default: the folder of this file),
+# so the whole project can be moved between machines/servers.
+paths:
+  root: .
+  bids_dir: ${HOPFEC_BIDS:-./bids}
+  derivatives_dir: ${HOPFEC_DERIV:-./bids/derivatives}   # holds fmriprep/, halfpipe/, qsiprep/, qsirecon*/
+  atlas_dir: ./atlases
+  participants_tsv: null            # default <bids_dir>/participants.tsv (columns: participant_id, group)
+  output_dir: ./derivatives/hopfec
+  work_dir: ./work
+  normative_connectome: ${DTOR_MAT:-}   # dTOR_fibers_vox_2_mm.mat(.gz) for template-based SC
+  fs_license: ${FS_LICENSE:-}
+
+participants:
+  id_column: null                   # auto: participant_id / subject / sub
+  group_column: null                # auto: group / diagnosis / dx (2nd column otherwise)
+
+input:
+  source: auto                      # auto | fmriprep | halfpipe | halfpipe-timeseries | timeseries
+  task: rest
+  space: MNI152NLin2009cAsym
+  res: "2"
+  tr: null                          # seconds; taken from sidecars if null
+  halfpipe_feature: null            # e.g. corrMatrix -> uses *_feature-corrMatrix_atlas-*_timeseries.tsv
+
+atlas:
+  name: Schaefer2018_100Parcels7Networks   # substring/regex matched against files in atlas_dir
+  file: null                               # or an explicit path
+  labels: null                             # explicit label table (tsv/txt) if not auto-detected
+
+fmriprep:
+  runtime: auto                     # docker | apptainer | singularity | native
+  image: nipreps/fmriprep:24.1.1
+  sif: null
+  output_spaces: [MNI152NLin2009cAsym:res-2]
+  nprocs: 8
+  mem_mb: 16000
+  fs_no_reconall: false
+
+postprocess:
+  confounds: acompcor               # none | 24P | 36P | acompcor | acompcor+gsr
+  n_acompcor: 5
+  include_cosine: true
+  band: [0.008, 0.08]
+  dummy_scans: auto
+  scrub_fd: null
+
+sc:
+  source: auto                      # auto | file | qsirecon | tractography | normative
+  file: null
+  weight: combined                  # normative/tractography weighting: count | volnorm | lencorr | combined
+  normalize: max
+  sc_max: 0.2
+  symmetrize: true
+  normative:
+    fiber_grid: auto                # auto | RAS | LAS  (see docs/normative_sc.md)
+    count_mode: touched             # touched | endpoints
+    cache: true
+  tractography:
+    backend: auto                   # mrtrix (preferred) | dipy
+    n_streamlines: 10000000
+    execute: false                  # write the MRtrix script only, unless true
+
+model:
+  filter_band: [0.008, 0.08]
+  tau_tr: 1
+  a: -0.02
+  beta: 0.02
+  dt: 0.1
+  G: null                           # fixed global coupling; null -> take the best value from the search
+  search:
+    enabled: true
+    G: {start: 0.0, stop: 3.0, step: 0.1}
+    a: null                         # {start: -0.2, stop: 0.0, num: 11} -> 2-D error surface
+    metric: fit_rmse
+    level: group                    # group | participant | both
+  gec:
+    eps_fc: 0.001
+    eps_tau: 0.001
+    max_iter: 2000
+    patience: 50
+    mask: sc_plus_homotopic
+  linear:
+    enabled: true
+    method: gradient                # gradient (exact gradient, L-BFGS-B) | gec (heuristic GEC iteration)
+    filter_consistent: true
+    fit_omega: true                 # co-estimate node frequencies (recommended)
+    fit_a: none                     # none | global | node
+    lambda_sc: 0.0                  # L2 pull towards the structural prior
+  nonlinear:
+    enabled: true
+    init: linear                    # initialise the non-linear GEC from the linear EC (or: sc)
+    n_sim: 2
+    eps_fc: 0.0005
+    eps_tau: 0.0005
+    max_iter: 300
+    patience: 20
+
+group:
+  fit_group_average: true
+  mean_of_participants: true
+  compare: true
+  compare_on: ECnorm                # edge-wise group tests on the max-normalised EC (or: EC)
+  fdr_q: 0.05
+  n_perm: 0                         # >0 adds a permutation (max-statistic FWE) test
+
+compute:
+  n_jobs: -1                        # joblib workers (-1 = all cores)
+  threads_per_job: 1
+
+stages: [timeseries, sc, fit]
