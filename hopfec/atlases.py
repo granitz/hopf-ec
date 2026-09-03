@@ -129,13 +129,27 @@ def read_label_table(path: str | Path) -> pd.DataFrame:
     df = None
     try:
         df = pd.read_csv(path, sep=sep, engine="python", comment="#", dtype=str)
-        if df.shape[1] < 2 or _pick_col(df.columns, ["index", "id", "label", "value", "roi", "region_id", "labelid", "label_id", "name", "region", "roi_name"]) is None:
+        if df.shape[1] < 2:
             df = None
     except Exception:  # noqa: BLE001
         df = None
     if df is not None:
         idc = _pick_col(df.columns, ["index", "id", "value", "roi", "region_id", "labelid", "label_id", "label"])
         namec = _pick_col(df.columns, ["name", "region", "roi_name", "region_name", "label_name", "labelname", "label"])
+        if idc is None or namec is None:
+            # unnamed / numeric headers (e.g. a pandas dump): guess an integer id column and a text column
+            df = df.loc[:, [c for c in df.columns if not str(c).startswith("Unnamed")]]
+            def _is_int(col):
+                return pd.to_numeric(col, errors="coerce").notna().all() and (pd.to_numeric(col, errors="coerce") % 1 == 0).all()
+            ints = [c for c in df.columns if _is_int(df[c])]
+            texts = [c for c in df.columns if pd.to_numeric(df[c], errors="coerce").isna().mean() > 0.5]
+            uniq = [c for c in ints if df[c].nunique() == len(df) and pd.to_numeric(df[c]).min() >= 1]
+            if idc is None and uniq and texts:
+                idc = uniq[0]
+            if namec is None and texts:
+                namec = texts[0]
+            if idc is not None and namec is not None and str(idc).strip() == "" :
+                idc = uniq[1] if len(uniq) > 1 else idc
         if namec == idc:
             others = [c for c in df.columns if c != idc]
             namec = others[0] if others else None
