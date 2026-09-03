@@ -91,9 +91,9 @@ the original `build_roi_to_roi_*.m` scripts, generalised to any atlas grid via t
 with the voxel-index convention of `fibers_vox` made explicit (`sc.normative.fiber_grid: RAS | LAS |
 auto`).  Both implementations were checked against a literal port of the original loops (exact match),
 and `matlab/hopf_linear_moments.m` reproduces the Python linear-model moments to 1e-11.  **Read `docs/normative_sc.md`** — the original script assumed `RAS` (x increases with the
-voxel index) while the connectome authors' own scripts index SPM-read volumes, which suggests the
-FSL/SPM `LAS` storage order; `auto` decides from the streamline density against template maps and
-reports the evidence.
+voxel index); the data-driven check on the actual file shows the FSL/SPM `LAS` storage order
+(density-template correlation 0.774 vs 0.729), so RAS-based matrices are left-right mirrored.
+`auto` runs that check and reports the evidence.
 
 ## Layout
 

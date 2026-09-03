@@ -44,6 +44,22 @@ correlation is used; both scores are printed and stored in the JSON (`orientatio
 `fiber_grid: RAS` to reproduce the original results exactly, or `LAS`/a custom 4×4 affine
 (`fiber_affine`) when the convention is known.
 
+### Result on the actual dTOR-985 file (2026-09-03)
+
+`hopfec sc orientation` on `dTOR_fibers_vox_2_mm.mat` (11,820,000 streamlines, 528 M points, all
+integer voxel indices in [-2, 100]) gave
+
+| convention | density-T1w correlation | points inside brain mask |
+|---|---|---|
+| RAS (original script) | 0.729 | 0.99924 |
+| **LAS** (FSL/SPM storage) | **0.774** | **0.99958** |
+
+i.e. the streamlines follow the FSL/SPM storage order (`x_mm = 92 - 2 i`).  SC matrices computed
+with the original RAS assumption are therefore left-right mirrored (left parcels received the
+right-hemisphere streamlines).  `fiber_grid: auto` selects LAS on this file; the builds in
+`scripts/build_normative_sc_tian.sh` use it explicitly and `scripts/summarize_normative_sc.py`
+verifies that the RAS build equals the LAS build after swapping left/right homologues.
+
 ## Template mismatch (MNI152NLin6Asym vs MNI152NLin2009cAsym)
 
 The fibers live in the FSL/HCP MNI152NLin6Asym grid, many atlases in MNI152NLin2009cAsym.  Aligning the
