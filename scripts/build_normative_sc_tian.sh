@@ -4,7 +4,7 @@
 # as in the original scripts).  Usage: scripts/build_normative_sc_tian.sh <RAS|LAS|auto> [work_dir] [out_dir]
 set -euo pipefail
 GRID=${1:-auto}
-WORK=${2:-/Volumes/Transcend/hopfec_work}
+WORK=${2:-$(cd "$(dirname "$0")/.." && pwd)/work}   # needs ~25 GB free (decompressed .mat + cache)
 OUT=${3:-$HOME/hopf-ec/derivatives/normative_sc}
 SPACES=${4:-"MNI152NLin6Asym 3T_MNI152NLin2009cAsym"}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)

@@ -1,0 +1,80 @@
+# Example: resting-state fMRI preprocessed with fMRIPrep (MNI152NLin2009cAsym, 2 mm) + dTOR-985
+# normative structural connectivity + Schaefer100/Tian-S1 (116 parcels) -> linear and non-linear Hopf EC.
+#
+#   export HOPFEC_BIDS=/data/study/bids            # raw BIDS with participants.tsv (participant_id, group)
+#   export HOPFEC_DERIV=/data/study/derivatives    # contains fmriprep/ (or halfpipe/)
+#   hopfec sc normative -c config/example_fmriprep_normative.yaml    # once (uses the point cache afterwards)
+#   hopfec timeseries   -c config/example_fmriprep_normative.yaml
+#   hopfec fit          -c config/example_fmriprep_normative.yaml
+paths:
+  root: ..                                    # project folder (this file lives in <root>/config)
+  bids_dir: ${HOPFEC_BIDS}
+  derivatives_dir: ${HOPFEC_DERIV}
+  output_dir: ./derivatives/hopfec
+  work_dir: ${HOPFEC_WORK:-./work}            # normative build needs ~25 GB here (17 GB .mat + 3 GB cache)
+  normative_connectome: ./data/dTOR_fibers_vox_2_mm.mat.gz
+  fs_license: ${FS_LICENSE:-}
+
+atlas:
+  # time series: the atlas in the space of the fMRIPrep outputs (2009cAsym); the normative SC is built
+  # with the same parcellation in the fibers' native MNI152NLin6Asym grid (identical labels/order).
+  file: ./data/Tian_atlas/schaefertian100/Schaefer2018_100Parcels_7Networks_order_Tian_Subcortex_S1_3T_MNI152NLin2009cAsym_2mm.nii.gz
+  labels: ./data/Tian_atlas/schaefertian100/SchaeferTian116.tsv
+  name: SchaeferTian116
+
+input:
+  source: auto                  # fmriprep -> hopfec timeseries; or HALFpipe outputs (paths.halfpipe_dir)
+  task: rest
+  space: MNI152NLin2009cAsym
+  res: "2"
+
+postprocess:
+  confounds: acompcor           # 24P motion + 5 aCompCor (combined mask) + cosine high-pass
+  n_acompcor: 5
+  band: [0.008, 0.08]
+  dummy_scans: auto
+
+sc:
+  source: file                  # normative SC built by `hopfec sc normative` (LAS, 6Asym atlas):
+  file: ./derivatives/normative_sc/sc/atlas-SchaeferTian116MNI152NLin6Asym_desc-normative_weight-combined_connectivity.tsv
+  weight: combined
+  normalize: max
+  sc_max: 0.2
+  symmetrize: true
+  threshold: 0.0                # e.g. 0.01 to drop the weakest normative links
+  normative:
+    fiber_grid: LAS             # verified on the dTOR-985 file (docs/normative_sc.md); auto re-checks
+    count_mode: touched
+    length_mode: npoints
+    cache: true
+    cache_dtype: int16          # coordinates are integers in [-2, 100]
+
+model:
+  filter_band: [0.008, 0.08]
+  tau_tr: 1
+  a: -0.02
+  search:
+    enabled: true
+    G: {start: 0.0, stop: 3.0, step: 0.1}
+    a: null
+    metric: fit_rmse
+    level: group
+  linear:
+    method: gradient
+    fit_omega: true
+    max_iter: 500
+  nonlinear:
+    enabled: true
+    init: linear
+    n_sim: 2
+    max_iter: 300
+    patience: 20
+
+group:
+  fit_group_average: true
+  mean_of_participants: true
+  compare: true
+  compare_on: ECnorm
+
+compute:
+  n_jobs: -1
