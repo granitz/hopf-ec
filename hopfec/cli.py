@@ -145,7 +145,9 @@ def cmd_timeseries(args):
 def cmd_sc(args):
     from .stages import get_atlas, load_participants, run_normative_stage, run_qsirecon_stage, run_tractography_stage
 
-    cfg = _setup(args, need_config=args.kind != "orientation" or not args.connectome)
+    cfg = _setup(args, need_config=False)   # everything can be given with --set / --connectome
+    if args.kind != "orientation" and not (cfg_get(cfg, "atlas.file") or cfg_get(cfg, "paths.atlas_dir")):
+        raise SystemExit("an atlas is required: -c config.yaml, or --set atlas.file=... (and atlas.labels=...)")
     if args.kind == "orientation":
         from .sc.normative import run_orientation_check
 

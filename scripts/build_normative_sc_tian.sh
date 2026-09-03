@@ -6,13 +6,14 @@ set -euo pipefail
 GRID=${1:-auto}
 WORK=${2:-/Volumes/Transcend/hopfec_work}
 OUT=${3:-$HOME/hopf-ec/derivatives/normative_sc}
+SPACES=${4:-"MNI152NLin6Asym 3T_MNI152NLin2009cAsym"}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 source "$ROOT/venv/bin/activate"
 CONN="$ROOT/data/dTOR_fibers_vox_2_mm.mat.gz"
 for n in 100 200 400; do
   N=$((n + 16))
   case "$n" in 400) LAB="$ROOT/data/Tian_atlas/SchaeferTian416.txt";; 100) LAB="$ROOT/data/Tian_atlas/schaefertian100/SchaeferTian116.tsv";; *) LAB="$ROOT/data/atlases_tian/Schaefer2018_${n}Parcels_7Networks_order_Tian_Subcortex_S1_label.txt";; esac
-  for SP in MNI152NLin6Asym 3T_MNI152NLin2009cAsym; do
+  for SP in $SPACES; do
     FILE="$ROOT/data/atlases_tian/Schaefer2018_${n}Parcels_7Networks_order_Tian_Subcortex_S1_${SP}_2mm.nii.gz"
     NAME="SchaeferTian${N}-${SP#3T_}"
     echo "=== $NAME ($GRID) ==="
