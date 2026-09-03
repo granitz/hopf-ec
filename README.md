@@ -44,7 +44,9 @@ hopfec run -c project.yaml               # stages listed in the config
 ```
 
 `hopfec inputs -c project.yaml` prints what was discovered for every participant (BOLD runs,
-time series, SC source) before anything heavy runs.
+time series, SC source) before anything heavy runs.  `config/example_fmriprep_normative.yaml` is a
+complete, ready-to-edit configuration for fMRIPrep outputs + dTOR-985 normative SC + Schaefer/Tian
+parcellation (set `HOPFEC_BIDS` / `HOPFEC_DERIV` and go).
 
 ## Outputs (`paths.output_dir`, BIDS-derivatives style)
 

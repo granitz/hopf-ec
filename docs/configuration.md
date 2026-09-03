@@ -24,6 +24,9 @@ paths:
   fs_license: ${FS_LICENSE:-}
 ```
 
+Path-like settings outside `paths` (`atlas.file`, `atlas.labels`, `sc.file`, `fmriprep.sif`,
+`sc.normative.brain_mask/wm_probseg/template_dir`) are resolved the same way.
+
 Moving a project to another server therefore only requires `export HOPFEC_BIDS=...` (or editing the
 few absolute paths) — no code changes.  `hopfec inputs -c cfg.yaml` shows the resolved paths and what
 was found for each participant.
