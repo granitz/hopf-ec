@@ -94,6 +94,7 @@ DEFAULTS: dict[str, Any] = {
             "count_mode": "touched",  # touched (every parcel a streamline passes) | endpoints
             "length_mode": "npoints", # npoints (n_points * voxel size, as in the original script) | polyline
             "cache": True,
+            "cache_dtype": "float32",  # uint8/int16 write the cache compactly when coordinates are known integers
             "chunk_size": 100000,
             "warp_atlas": "auto",     # auto | never | always : warp atlas into fiber template space with ANTs+TemplateFlow
             "brain_mask": None,       # optional brain mask in the fiber grid for orientation diagnostics

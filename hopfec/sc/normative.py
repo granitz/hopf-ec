@@ -67,9 +67,10 @@ class FiberStore:
     given; later passes (other atlases, orientation checks) read the cache with memory mapping.
     """
 
-    def __init__(self, mat_path: str | Path, var_name: str | None = None, cache_dir: str | Path | None = None):
+    def __init__(self, mat_path: str | Path, var_name: str | None = None, cache_dir: str | Path | None = None, cache_dtype: str = "float32"):
         self.mat_path = Path(mat_path)
         self.var_name = var_name
+        self.cache_dtype = cache_dtype
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self._cache_base = (self.cache_dir / (self.mat_path.stem + "_cache")) if self.cache_dir else None
         self.n_streamlines: int | None = None
@@ -147,7 +148,7 @@ class FiberStore:
                 p = np.asarray(pts[o[0] : o[-1]], dtype=np.float32)
                 yield p, (o - o[0]).astype(np.int64)
             return
-        writer = _CacheWriter(*self._cache_paths()[:2]) if (write_cache and self._cache_base) else None
+        writer = _CacheWriter(*self._cache_paths()[:2], tmp_dtype=self.cache_dtype) if (write_cache and self._cache_base) else None
         t0 = time.time()
         done = 0
         for arrs in self._iter_mat(chunk_size):
@@ -166,13 +167,17 @@ class FiberStore:
 
 
 class _CacheWriter:
-    """Append-only writer of concatenated points (smallest exact integer dtype) + offsets."""
+    """Append-only writer of concatenated points (smallest exact integer dtype) + offsets.
 
-    def __init__(self, pts_path: Path, off_path: Path):
+    tmp_dtype: dtype of the temporary stream ('float32' = lossless for anything; 'uint8'/'int16' write
+    compactly when the coordinates are known to be integers in range - a violating chunk raises)."""
+
+    def __init__(self, pts_path: Path, off_path: Path, tmp_dtype: str = "float32"):
         ensure_dir(pts_path.parent)
         self.pts_path, self.off_path = pts_path, off_path
         self.tmp = pts_path.with_suffix(".tmp")
         self.f = open(self.tmp, "wb")
+        self.tmp_dtype = np.dtype(tmp_dtype)
         self.lengths: list[np.ndarray] = []
         self.n_points = 0
         self.integer = True
@@ -184,7 +189,11 @@ class _CacheWriter:
                 self.integer = False
             self.vmin = min(self.vmin, float(pts.min()))
             self.vmax = max(self.vmax, float(pts.max()))
-        pts.astype(np.float32).tofile(self.f)
+            if self.tmp_dtype.kind in "ui":
+                info = np.iinfo(self.tmp_dtype)
+                if not self.integer or self.vmin < info.min or self.vmax > info.max:
+                    raise ValueError(f"cache dtype {self.tmp_dtype} cannot hold coordinates in [{self.vmin}, {self.vmax}] (integer={self.integer}); use cache_dtype: float32")
+        pts.astype(self.tmp_dtype).tofile(self.f)
         self.lengths.append(lengths)
         self.n_points += len(pts)
 
@@ -192,13 +201,26 @@ class _CacheWriter:
         self.f.close()
         lengths = np.concatenate(self.lengths) if self.lengths else np.zeros(0, np.int64)
         offsets = np.concatenate([[0], np.cumsum(lengths)]).astype(np.int64)
-        raw = np.memmap(self.tmp, dtype=np.float32, mode="r", shape=(self.n_points, 3))
+        raw = np.memmap(self.tmp, dtype=self.tmp_dtype, mode="r", shape=(self.n_points, 3))
         if self.integer and self.vmin >= 0 and self.vmax <= 255:
             dtype = np.uint8
         elif self.integer and abs(self.vmin) < 32000 and self.vmax < 32000:
             dtype = np.int16
         else:
             dtype = np.float32
+        if self.tmp_dtype == np.dtype(dtype):
+            # already compact: turn the raw stream into a .npy by prepending the header
+            with open(self.pts_path, "wb") as fo:
+                np.lib.format.write_array_header_1_0(fo, {"descr": np.lib.format.dtype_to_descr(np.dtype(dtype)), "fortran_order": False, "shape": (self.n_points, 3)})
+                with open(self.tmp, "rb") as fi:
+                    shutil.copyfileobj(fi, fo, length=64 * 1024 * 1024)
+            del raw
+            self.tmp.unlink()
+            np.save(self.off_path, offsets)
+            save_json(meta_path, {"n_streamlines": int(n_streamlines), "n_points": int(self.n_points), "dtype": np.dtype(dtype).name,
+                                  "integer_coordinates": bool(self.integer), "min": self.vmin, "max": self.vmax, "source": source})
+            LOG.info("cache written: %d streamlines, %d points (%s)", n_streamlines, self.n_points, np.dtype(dtype).name)
+            return
         out = np.lib.format.open_memmap(self.pts_path, mode="w+", dtype=dtype, shape=(self.n_points, 3))
         step = 50_000_000
         for s in range(0, self.n_points, step):
@@ -399,7 +421,7 @@ def run_orientation_check(connectome: str | Path, work_dir: str | Path, cfg: dic
     cfg = dict(cfg or {})
     work_dir = ensure_dir(work_dir)
     mat = resolve_connectome_file(connectome, work_dir)
-    store = FiberStore(mat, cfg.get("var_name"), cache_dir=work_dir if cfg.get("cache", True) else None)
+    store = FiberStore(mat, cfg.get("var_name"), cache_dir=work_dir if cfg.get("cache", True) else None, cache_dtype=cfg.get("cache_dtype", "float32"))
     t0 = time.time()
     dens = streamline_density(store, int(cfg.get("chunk_size", 100_000)))
     np.save(work_dir / "streamline_density_fibergrid.npy", dens)
@@ -430,7 +452,7 @@ def build_normative_sc(atlas: Atlas, connectome: str | Path, out_dir: str | Path
     work_dir = ensure_dir(work_dir or (Path(out_dir) / "work"))
     t0 = time.time()
     mat = resolve_connectome_file(connectome, work_dir)
-    store = FiberStore(mat, cfg.get("var_name"), cache_dir=work_dir if cfg.get("cache", True) else None)
+    store = FiberStore(mat, cfg.get("var_name"), cache_dir=work_dir if cfg.get("cache", True) else None, cache_dtype=cfg.get("cache_dtype", "float32"))
     chunk = int(cfg.get("chunk_size", 100_000))
     grid = cfg.get("fiber_grid", "auto")
     atlas_used = atlas
