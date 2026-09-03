@@ -152,8 +152,11 @@ def read_label_table(path: str | Path) -> pd.DataFrame:
                 idc = uniq[0]
             if namec is None and texts:
                 namec = texts[0]
-            if idc is not None and namec is not None and str(idc).strip() == "" :
+            if idc is not None and namec is not None and str(idc).strip() == "":
                 idc = uniq[1] if len(uniq) > 1 else idc
+            if idc is None or namec is None or idc == namec:
+                df = None
+    if df is not None:
         if namec == idc:
             others = [c for c in df.columns if c != idc]
             namec = others[0] if others else None
