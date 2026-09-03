@@ -25,6 +25,11 @@ def test_config_paths_env_and_relative(tmp_path, monkeypatch):
     assert cfg["model"]["a"] == -0.05 and cfg["model"]["beta"] == 0.02  # override + default kept
     cfg2 = load_config(cfg_file, {"model": {"a": -0.1}})
     assert cfg2["model"]["a"] == -0.1
+    cfg_file.write_text("paths:\n  root: ..\natlas:\n  file: data/atlas.nii.gz\nsc:\n  file: sc/{sub}_sc.tsv\n")
+    cfg3 = load_config(cfg_file)
+    assert cfg3["paths"]["root"] == str(tmp_path)
+    assert cfg3["atlas"]["file"] == str(tmp_path / "data" / "atlas.nii.gz")
+    assert cfg3["sc"]["file"] == str(tmp_path / "sc" / "{sub}_sc.tsv")
 
 
 def test_entities_roundtrip():

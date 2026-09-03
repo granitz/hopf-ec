@@ -207,8 +207,21 @@ def _expand_strings(obj):
     return obj
 
 
+# path-like settings outside the paths section that are resolved against paths.root as well
+NESTED_PATH_KEYS = ["atlas.file", "atlas.labels", "sc.file", "fmriprep.sif", "fmriprep.templateflow_home",
+                    "sc.normative.brain_mask", "sc.normative.wm_probseg", "sc.normative.template_dir"]
+
+
+def _set_dotted(cfg: dict, dotted: str, value) -> None:
+    cur = cfg
+    parts = dotted.split(".")
+    for part in parts[:-1]:
+        cur = cur.setdefault(part, {})
+    cur[parts[-1]] = value
+
+
 def resolve_paths(cfg: dict, base_dir: str | os.PathLike | None) -> dict:
-    """Expand env vars and make every entry of ``cfg['paths']`` absolute."""
+    """Expand env vars and make every entry of ``cfg['paths']`` (and NESTED_PATH_KEYS) absolute."""
     paths = dict(cfg.get("paths") or {})
     root = paths.get("root")
     base = Path(base_dir) if base_dir is not None else Path.cwd()
@@ -239,6 +252,10 @@ def resolve_paths(cfg: dict, base_dir: str | os.PathLike | None) -> dict:
         if cand.exists():
             paths["participants_tsv"] = str(cand)
     cfg["paths"] = paths
+    for key in NESTED_PATH_KEYS:
+        v = cfg_get(cfg, key)
+        if isinstance(v, str) and v.strip():
+            _set_dotted(cfg, key, str(expand_path(v, root_p)))
     return cfg
 
 
