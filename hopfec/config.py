@@ -278,10 +278,17 @@ def load_config(path: str | os.PathLike | None = None, overrides: Mapping | None
     base_dir = None
     if path is not None:
         path = Path(path)
-        with open(path) as f:
-            user = yaml.safe_load(f) or {}
+        try:
+            with open(path) as f:
+                user = yaml.safe_load(f) or {}
+        except yaml.YAMLError as e:
+            mark = getattr(e, "problem_mark", None)
+            where = f" (line {mark.line + 1}, column {mark.column + 1})" if mark is not None else ""
+            raise SystemExit(f"{path}: YAML syntax error{where}: {getattr(e, 'problem', e)}.\n"
+                             "Hint: environment variables are set in the shell (export HOPFEC_BIDS=/path), not inside the YAML; "
+                             "inside the YAML write `bids_dir: /path` or `bids_dir: ${HOPFEC_BIDS}`.") from None
         if not isinstance(user, dict):
-            raise ValueError(f"config {path} must be a mapping at top level")
+            raise SystemExit(f"config {path} must be a mapping at top level (key: value pairs)")
         cfg = deep_update(cfg, user)
         base_dir = path.parent.resolve()
         cfg["_config_file"] = str(path.resolve())
