@@ -95,8 +95,17 @@ def cmd_participants(args):
     cfg = _setup(args, need_config=False) if args.config else None
     tsv = args.participants_tsv or (cfg_get(cfg, "paths.participants_tsv") if cfg else None)
     bids = args.bids_dir or (cfg_get(cfg, "paths.bids_dir") if cfg else None)
+    if args.path:  # positional: a BIDS folder (uses its participants.tsv) or a table file
+        p = Path(args.path)
+        if p.is_dir():
+            bids = bids or str(p)
+            tsv = tsv or str(p / "participants.tsv")
+        else:
+            tsv = str(p)
     if not tsv:
-        raise SystemExit("give --participants-tsv or a config with paths.participants_tsv")
+        raise SystemExit("give a BIDS folder or table: hopfec participants <bids_dir|participants.tsv>, or --participants-tsv / a config")
+    if not Path(tsv).exists():
+        raise SystemExit(f"participants table not found: {tsv}")
     df = read_participants(tsv, args.id_column, args.group_column)
     print(df.to_string(index=False))
     if bids and Path(bids).exists():
@@ -250,6 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_atlases)
 
     s = sub.add_parser("participants", help="read/validate the participants table (id + group)")
+    s.add_argument("path", nargs="?", help="BIDS folder (its participants.tsv is used) or a participants table (.tsv/.csv)")
     s.add_argument("--participants-tsv")
     s.add_argument("--bids-dir")
     s.add_argument("--id-column")
