@@ -80,7 +80,7 @@ def read_participants(path: str | Path, id_column: str | None = None, group_colu
     df.columns = [str(c).strip() for c in df.columns]
     cols_l = {c.lower(): c for c in df.columns}
     if id_column is None:
-        for cand in ("participant_id", "participant", "subject_id", "subject", "sub", "id"):
+        for cand in ("participant_id", "participant", "subjects", "subject_id", "subject", "sub", "id"):
             if cand in cols_l:
                 id_column = cols_l[cand]
                 break
