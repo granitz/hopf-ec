@@ -24,7 +24,7 @@ from .models.gec import fit_gec, initial_ec, make_mask
 from .models.hopf_linear import analytic_moments
 from .models.hopf_nonlinear import simulated_moments
 from .models.linear_gradient import fit_linear_gradient
-from .models.search import error_surface, grid_search
+from .models.search import adaptive_search, error_surface
 from .models.signal import average_spectra, empirical_moments, fcd_distribution, metastability, peak_frequencies
 from .plotting import plot_ec_summary, plot_error_surface, plot_fit, plot_group_comparison
 from .sc.common import prepare_sc
@@ -204,15 +204,18 @@ def _omega(emp: dict) -> np.ndarray:
 
 
 def run_search(model: str, SC: np.ndarray, emp: dict, cfg: dict, out_base: Path, n_jobs: int, title: str = "") -> dict:
+    """Adaptive (G x a) search: grid, border extension, refinement, interpolation, optional continuous optimisation."""
     m = _model_cfg(cfg)
     s = m.get("search", {})
     G_values = linspace_spec(s.get("G", {"start": 0.0, "stop": 3.0, "step": 0.1}))
     a_values = linspace_spec(s.get("a")) if s.get("a") is not None else None
     metric = s.get("metric", "fit_rmse")
-    df, best = grid_search(model, SC, _omega(emp), emp, emp["tr"], G_values, a_values, m.get("filter_band"), int(m.get("tau_tr", 1)),
-                           float(m.get("beta", 0.02)), float(m.get("dt", 0.1)), int(s.get("n_sim", 1)), int(cfg_get(cfg, "model.nonlinear.seed", 0)),
-                           float(m.get("transient_s", 100.0)), bool(cfg_get(cfg, "model.linear.filter_consistent", True)), metric,
-                           m.get("fcd", {}), n_jobs, cfg_get(cfg, "model.nonlinear.use_numba", "auto"), default_a=_scalar_a(m))
+    df, best, info = adaptive_search(model, SC, _omega(emp), emp, emp["tr"], G_values, a_values, m.get("filter_band"), search_cfg=s,
+                                     tau_tr=int(m.get("tau_tr", 1)), beta=float(m.get("beta", 0.02)), dt=float(m.get("dt", 0.1)),
+                                     n_sim=int(s.get("n_sim", 1)), seed=int(cfg_get(cfg, "model.nonlinear.seed", 0)),
+                                     transient_s=float(m.get("transient_s", 100.0)), filter_consistent=bool(cfg_get(cfg, "model.linear.filter_consistent", True)),
+                                     metric=metric, fcd_cfg=m.get("fcd", {}), n_jobs=n_jobs, use_numba=cfg_get(cfg, "model.nonlinear.use_numba", "auto"),
+                                     default_a=_scalar_a(m))
     ensure_dir(out_base.parent)
     df.to_csv(str(out_base) + "_desc-errorsurface_table.tsv", sep="\t", index=False, float_format="%.6g")
     Gs, As, surf = error_surface(df, metric)
@@ -222,9 +225,12 @@ def run_search(model: str, SC: np.ndarray, emp: dict, cfg: dict, out_base: Path,
         if extra in df.columns and extra != metric:
             _, _, s2 = error_surface(df, extra)
             pd.DataFrame(s2, index=[f"G={g:g}" for g in Gs], columns=[f"a={a:g}" for a in As]).to_csv(str(out_base) + f"_desc-errorsurface_{extra}.tsv", sep="\t", float_format="%.6g")
-    plot_error_surface(Gs, As, surf, metric, Path(str(out_base) + "_desc-errorsurface.png"), best, title=title)
-    save_json(Path(str(out_base) + "_desc-search.json"), {"best": best, "metric": metric, "G_values": Gs, "a_values": As, "n_points": len(df)})
-    LOG.info("%s search (%s): best G=%.3g a=%.3g %s=%.4g", model, title, best["G"], best["a"], metric, best[metric])
+    refined = df[df["stage"] == "refined"] if "stage" in df.columns else None
+    plot_error_surface(Gs, As, surf, metric, Path(str(out_base) + "_desc-errorsurface.png"), best, title=title,
+                       extra_points=refined, used=(best["G"], best["a"]), grid_best=(best.get("G_grid", best["G"]), best.get("a_grid", best["a"])))
+    save_json(Path(str(out_base) + "_desc-search.json"), {"best": best, "metric": metric, "G_values": Gs, "a_values": As, "n_points": len(df), **info})
+    LOG.info("%s search (%s): G=%.4g a=%.4g via %s; %s=%.4g at the grid optimum%s", model, title, best["G"], best["a"], best.get("source", "grid"),
+             metric, best[metric], "; WARNINGS: " + " | ".join(info["warnings"]) if info.get("warnings") else "")
     return best
 
 
@@ -248,6 +254,11 @@ def fit_one(model: str, emp: dict, SC: np.ndarray, G: float, a, cfg: dict, atlas
     gcfg = m.get("gec", {})
     mask = make_mask(SC, N, gcfg.get("mask", "sc_plus_homotopic"), atlas.homotopic_pairs())
     omega = _omega(emp) if omega_override is None else np.asarray(omega_override, float)
+    if model == "nonlinear" or cfg_get(cfg, "model.linear.method", "gradient") == "gec":
+        if C_init is None and float(G) <= 0:
+            raise ValueError("global coupling G <= 0 (uncoupled model): the GEC iteration cannot fit anything; set model.G > 0 or a search grid without 0")
+    elif float(G) <= 0 and C_init is None:
+        LOG.warning("G <= 0 from the search: the gradient fit starts from an all-zero coupling (poor initialisation)")
     t0 = time.time()
     out: dict = {"model": model, "G_search": float(G), "omega_source": "spectral_peaks" if omega_override is None else "linear_fit", "a": a if np.isscalar(a) else list(a), "tr": tr, "tau_tr": tau, "n_volumes": emp.get("n_volumes")}
     if model == "linear":

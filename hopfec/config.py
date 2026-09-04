@@ -132,6 +132,19 @@ DEFAULTS: dict[str, Any] = {
             "metric": "fit_rmse",       # fc_corr | fc_rmse | fit_rmse | fcd_ks | combined
             "n_sim": 1,
             "level": "group",           # group | participant | both : whose FC the search is fitted on
+            # border handling: an optimum on the edge of the grid extends the grid (same step) on that side
+            "border_action": "extend",  # extend | warn | ignore
+            "extend_factor": 0.5,       # fraction of the axis span added per extension
+            "max_extensions": 2,
+            "G_min": 0.0, "G_max": 10.0,    # hard caps for extension / continuous optimisation
+            "a_min": -1.0, "a_max": 0.5,
+            "allow_zero_G": False,      # G = 0 is evaluated but never selected (uncoupled model)
+            "refine": True,             # coarse-to-fine pass (+- one coarse step, refine_points per axis)
+            "refine_points": 7,
+            "interpolate": True,        # parabolic interpolation through the optimum
+            "continuous": False,        # continuous (G, a) optimisation after the grid stages
+            "continuous_method": "auto",  # auto = L-BFGS-B with analytic gradient (linear, fit_rmse) else Powell
+            "continuous_max_fev": 60,
         },
         "gec": {
             "eps_fc": 0.001,
@@ -368,6 +381,11 @@ model:
     a: null                         # {start: -0.2, stop: 0.0, num: 11} -> 2-D error surface
     metric: fit_rmse
     level: group                    # group | participant | both
+    border_action: extend           # optimum on a grid edge: extend (same step, up to max_extensions) | warn | ignore
+    G_max: 10.0                     # caps for the extension (G_min 0; a_min -1.0, a_max 0.5)
+    refine: true                    # coarse-to-fine pass around the optimum, then parabolic interpolation
+    interpolate: true
+    continuous: false               # true: continuous (G, a) optimisation (analytic gradient for the linear model)
   gec:
     eps_fc: 0.001
     eps_tau: 0.001

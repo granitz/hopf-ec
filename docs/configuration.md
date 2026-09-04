@@ -52,3 +52,13 @@ group are ignored; `participants.include/exclude` and `--participant-label` subs
 time-series extraction run in parallel; each worker is single-threaded (loky limits BLAS threads).
 For clusters use `scripts/slurm_array.sh` (one participant per task, `--participants-only`) followed by
 `scripts/slurm_group.sh` (`--group-only`).
+
+## Parameter search ranges
+
+`model.search.G` / `model.search.a` accept `{start, stop, step}`, `{start, stop, num}` or `{values: [...]}`
+(inclusive).  With `border_action: extend` (default) an optimum on a grid edge extends the grid on that
+side (same step, `extend_factor` x span, up to `max_extensions`, capped by `G_min/G_max` and
+`a_min/a_max`); `refine`/`refine_points` add a finer pass around the optimum; `interpolate` applies a
+parabolic fit; `continuous` switches on a continuous (G, a) optimisation afterwards.  `G = 0` is never
+selected unless `allow_zero_G: true`.  The chosen values and their provenance (`source`) are stored in
+`*_desc-search.json`.

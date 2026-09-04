@@ -136,6 +136,7 @@ class GradientFitResult:
     COVtau_sim: np.ndarray | None = None
     metrics: dict = field(default_factory=dict)
     elapsed_s: float = 0.0
+    bound_hits: dict = field(default_factory=dict)
 
     def summary(self) -> dict:
         return {"loss": self.loss, "n_iter": self.n_iter, "n_fev": self.n_fev, "success": self.success,
@@ -234,4 +235,20 @@ def fit_linear_gradient(FC_emp: np.ndarray, COVtau_emp: np.ndarray, C0: np.ndarr
     if history:
         out.metrics["initial_fit_rmse"] = history[0]["fit_rmse"]
         out.metrics["initial_fc_corr"] = history[0]["fc_corr"]
+    # parameters that ended on a box constraint (validity guard: report, do not hide)
+    tol = 1e-9
+    hits = {"n_C_at_zero": int(np.sum(res.x[:n_c] <= tol)), "n_C_at_cmax": int(np.sum(res.x[:n_c] >= c_max - tol)) if c_max is not None else 0,
+            "n_a_at_lower": 0, "n_a_at_upper": 0, "n_omega_at_lower": 0}
+    if n_a:
+        av_fit = res.x[n_c : n_c + n_a]
+        hits["n_a_at_lower"] = int(np.sum(av_fit <= a_bounds[0] + tol))
+        hits["n_a_at_upper"] = int(np.sum(av_fit >= a_bounds[1] - tol))
+    if n_w:
+        hits["n_omega_at_lower"] = int(np.sum(res.x[n_c + n_a :] <= 1e-4 + tol))
+    out.bound_hits = hits
+    for k in ("n_a_at_lower", "n_a_at_upper", "n_omega_at_lower", "n_C_at_cmax"):
+        out.metrics[k] = hits[k]
+    if hits["n_a_at_lower"] or hits["n_a_at_upper"] or hits["n_omega_at_lower"] or hits["n_C_at_cmax"]:
+        LOG.warning("gradient fit: parameters at their bounds %s (a bounds %s, omega >= 1e-4, C <= c_max); widen a_bounds / c_max if unintended",
+                    {k: v for k, v in hits.items() if v and k != "n_C_at_zero"}, a_bounds)
     return out

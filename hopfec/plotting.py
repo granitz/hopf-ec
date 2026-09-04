@@ -56,24 +56,39 @@ def plot_sc_panels(mats: dict, path: Path, title: str = ""):
 
 
 def plot_error_surface(Gs: np.ndarray, As: np.ndarray, surf: np.ndarray, metric: str, path: Path, best: dict | None = None,
-                       title: str = ""):
-    fig, ax = plt.subplots(figsize=(7, 4.5))
+                       title: str = "", extra_points=None, used: tuple | None = None, grid_best: tuple | None = None):
+    """Coarse (regular) error surface; refinement points and the optimum actually used are overlaid."""
+    fig, ax = plt.subplots(figsize=(7.5, 4.8))
     if len(As) == 1:
-        ax.plot(Gs, surf[:, 0], "o-")
+        ax.plot(Gs, surf[:, 0], "o-", label="coarse grid")
+        if extra_points is not None and len(extra_points):
+            ax.plot(extra_points["G"], extra_points[metric], ".", color="tab:orange", ms=7, label="refinement")
+        if grid_best is not None:
+            ax.axvline(grid_best[0], color="grey", ls=":", label=f"grid optimum G = {grid_best[0]:.3g}")
+        if used is not None:
+            ax.axvline(used[0], color="r", ls="--", label=f"used G = {used[0]:.4g}")
+        elif best:
+            ax.axvline(best["G"], color="r", ls="--", label=f"best G = {best['G']:.3g}")
         ax.set_xlabel("global coupling G")
         ax.set_ylabel(metric)
-        if best:
-            ax.axvline(best["G"], color="r", ls="--", label=f"best G = {best['G']:.3g}")
-            ax.legend()
+        ax.legend(fontsize=8)
         ax.set_title(title or f"{metric} vs G (a = {As[0]:.3g})")
     else:
-        im = ax.imshow(surf.T, origin="lower", aspect="auto", extent=[Gs[0], Gs[-1], As[0], As[-1]], cmap="viridis")
+        dG = (Gs[1] - Gs[0]) / 2 if len(Gs) > 1 else 0.5
+        dA = (As[1] - As[0]) / 2 if len(As) > 1 else 0.05
+        im = ax.imshow(surf.T, origin="lower", aspect="auto", extent=[Gs[0] - dG, Gs[-1] + dG, As[0] - dA, As[-1] + dA], cmap="viridis")
         ax.set_xlabel("global coupling G")
         ax.set_ylabel("bifurcation parameter a")
         fig.colorbar(im, ax=ax, label=metric)
-        if best:
+        if extra_points is not None and len(extra_points):
+            ax.scatter(extra_points["G"], extra_points["a"], c=extra_points[metric], cmap="viridis", s=12, edgecolors="w", linewidths=0.3, label="refinement")
+        if grid_best is not None:
+            ax.plot(grid_best[0], grid_best[1], "o", mfc="none", mec="w", ms=10, label="grid optimum")
+        if used is not None:
+            ax.plot(used[0], used[1], "r*", ms=14, label=f"used (G={used[0]:.3g}, a={used[1]:.3g})")
+        elif best:
             ax.plot(best["G"], best["a"], "r*", ms=14, label=f"best (G={best['G']:.3g}, a={best['a']:.3g})")
-            ax.legend(loc="upper right")
+        ax.legend(loc="upper right", fontsize=8)
         ax.set_title(title or f"error surface: {metric}")
     return _save(fig, path)
 

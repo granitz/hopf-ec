@@ -81,7 +81,9 @@ moments) and the coupling matrix (optionally node frequencies and `a`) is estima
 published heuristic GEC iteration.  **Non-linear model**: Euler–Maruyama simulations (numba) with the
 GEC update rule `C_ij += ε_FC (FC_emp − FC_sim) + ε_τ (COVtau_emp − COVtau_sim)`, initialised from the
 linear solution.  The global coupling `G` (and optionally `a`) come from a parallel grid search whose
-error surface is saved.  Group EC is fitted to group-average statistics and also reported as the
+error surface is saved; optima on a grid edge extend the grid automatically, a coarse-to-fine pass with
+parabolic interpolation refines them, invalid (unstable) points are flagged, and a continuous (G, a)
+optimisation is available.  Group EC is fitted to group-average statistics and also reported as the
 mean of participant ECs; groups are compared edge-wise (FDR) on the max-normalised EC by default
 (`group.compare_on`).  Details, references and the validation on synthetic ground truth:
 `docs/methods.md`.

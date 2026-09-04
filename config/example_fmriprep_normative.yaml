@@ -56,9 +56,12 @@ model:
   search:
     enabled: true
     G: {start: 0.0, stop: 3.0, step: 0.1}
-    a: null
+    a: null                       # {start: -0.2, stop: -0.01, num: 8} for a 2-D (G, a) surface
     metric: fit_rmse
     level: group
+    border_action: extend         # grid edge optimum -> extend the grid (caps G_max 10, a in [-1, 0.5])
+    refine: true                  # finer pass around the optimum + parabolic interpolation
+    continuous: false             # true: L-BFGS-B on (G, a) with analytic gradients (linear model)
   linear:
     method: gradient
     fit_omega: true

@@ -66,11 +66,29 @@ scripts in the repository history.
 
 ## Parameter search / error surface
 
-`model.search.G` (and optionally `model.search.a`) define the grid; the homogeneous model `C = SC` is
-evaluated at every point in parallel (`joblib`); metrics: `fit_rmse` (default), `fc_corr`, `fc_rmse`,
-`tau_rmse`, `fcd_ks` (KS distance of FCD distributions, needs simulation), `meta_diff`, `combined`.
-Outputs: long table, 2-D surface TSV/NPZ per metric, PNG, `*_desc-search.json` with the optimum.
-`search.level: group | participant | both` chooses whose FC is used.
+`model.search.G` (and optionally `model.search.a`) define the coarse grid; the homogeneous model
+`C = SC` is evaluated at every point in parallel (`joblib`); metrics: `fit_rmse` (default), `fc_corr`,
+`fc_rmse`, `tau_rmse`, `fcd_ks` (KS distance of FCD distributions, needs simulation), `meta_diff`,
+`combined`.  `search.level: group | participant | both` chooses whose FC is used.  The search then:
+
+1. **validity guards** - linear-model points whose linearisation is unstable (some `a_j >= G sum_k C_jk`)
+   are marked invalid (NaN); `G = 0` (uncoupled model) is evaluated for the surface but never selected
+   (`allow_zero_G`); a selected optimum next to invalid points is flagged `at_validity_limit`;
+2. **border detection + extension** - if the optimum lies on an edge of the grid the axis is extended
+   beyond that edge with the same step (`extend_factor` x span, at most `max_extensions` times, within
+   `G_min/G_max`, `a_min/a_max`) and the new points are evaluated; `border_action: warn` only reports;
+3. **coarse-to-fine refinement** - `refine_points` values per axis within +- one coarse step of the
+   optimum, then **parabolic interpolation** through the optimum and its neighbours (per axis, only if
+   the parabola is convex and the vertex is bracketed);
+4. **optional continuous optimisation** (`continuous: true`) - starting from the interpolated optimum,
+   L-BFGS-B on (G[, a]) with the exact adjoint gradient of `fit_rmse²` for the linear model, or
+   derivative-free Powell on any metric/model (fixed simulation seed, `continuous_max_fev`).
+
+Outputs: `*_desc-errorsurface_table.tsv` (every evaluated point with `stage` and `valid`), regular
+coarse/extended surface TSV/NPZ per metric, PNG with refinement points and the optimum actually used,
+and `*_desc-search.json` (`best`, `border`, `extensions`, `best_coarse`, `best_refined`,
+`interpolated`, `continuous`, `used`, `warnings`).  In the gradient fit, parameters that end on a box
+constraint are counted (`n_a_at_lower/upper`, `n_omega_at_lower`, `n_C_at_cmax`) and logged.
 
 ## Group level
 
