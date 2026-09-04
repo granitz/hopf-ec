@@ -38,13 +38,18 @@ def test_axis_helpers():
 
 def test_border_extension_finds_optimum_beyond_initial_grid(truth):
     t = truth
+    # budget of 2 extensions: the optimum (G = 2.5, error 0) is reached but sits on the outer edge -> flagged
     df, best, info = adaptive_search("linear", t["SC"], t["omega"], t["emp"], t["tr"], np.arange(0.0, 1.01, 0.25), None, t["band"],
                                      search_cfg={"refine": True, "interpolate": True, "continuous": False}, default_a=t["a_true"], n_jobs=1)
     assert info["extensions"], "grid should have been extended"
     assert info["best_refined"]["G"] > 1.0 and info["best_coarse"]["G"] == 1.0
     assert abs(best["G"] - t["G_true"]) < 0.06, best
     assert best["source"] in ("parabolic_interpolation", "refined_grid")
-    assert not info["border"]["on_border"]
+    assert info["border"]["on_border"] and any("border" in w for w in info["warnings"])
+    # one more extension confirms the optimum is interior
+    df, best, info = adaptive_search("linear", t["SC"], t["omega"], t["emp"], t["tr"], np.arange(0.0, 1.01, 0.25), None, t["band"],
+                                     search_cfg={"refine": True, "interpolate": True, "continuous": False, "max_extensions": 3}, default_a=t["a_true"], n_jobs=1)
+    assert abs(best["G"] - t["G_true"]) < 0.06 and not info["border"]["on_border"] and not info["warnings"]
 
 
 def test_border_warn_only(truth):
