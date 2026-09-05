@@ -20,13 +20,13 @@ from .atlases import Atlas
 from .config import cfg_get
 from .inputs.common import TimeseriesFile
 from .inputs.halfpipe import find_halfpipe_timeseries
-from .models.gec import fit_gec, initial_ec, make_mask
+from .models.gec import fit_error, fit_gec, initial_ec, make_mask
 from .models.hopf_linear import analytic_moments
 from .models.hopf_nonlinear import simulated_moments
 from .models.linear_gradient import fit_linear_gradient
 from .models.nonlinear_fit import fit_nonlinear_surrogate, noise_floor
 from .models.search import adaptive_search, error_surface
-from .models.signal import average_spectra, empirical_moments, fcd_distribution, metastability, peak_frequencies
+from .models.signal import average_spectra, empirical_moments, fcd_distribution, lagged_correlation, metastability, peak_frequencies
 from .plotting import plot_ec_summary, plot_error_surface, plot_fit, plot_group_comparison
 from .sc.common import prepare_sc
 from .timeseries import load_timeseries
@@ -100,11 +100,16 @@ def load_subject_empirical(files: list[TimeseriesFile], cfg: dict, n_expected: i
     """Empirical statistics of one participant averaged over runs."""
     band = cfg_get(cfg, "model.filter_band", [0.008, 0.08])
     freq_band = cfg_get(cfg, "model.freq_band") or band
-    tau = int(cfg_get(cfg, "model.tau_tr", 1))
+    pre_cfg = cfg_get(cfg, "input.prefiltered_band", "auto")
+    tau_cfg = cfg_get(cfg, "model.tau_tr", 1)
+    taus = [int(t) for t in (tau_cfg if isinstance(tau_cfg, (list, tuple)) else [tau_cfg])]
+    tau = taus[0]
     smooth = float(cfg_get(cfg, "model.spectrum_smoothing_hz", 0.01))
     fcd_cfg = cfg_get(cfg, "model.fcd", {})
     min_vol = int(cfg_get(cfg, "model.min_volumes", 50))
     fcs, covs, specs, fcds, metas, nvols, trs, used = [], [], [], [], [], [], [], []
+    covs_multi: list[list[np.ndarray]] = []
+    filtered_runs: list[np.ndarray] = []
     bad_nodes: set[int] = set()
     for f in files:
         X, _names = load_timeseries(f.path, n_expected)
@@ -117,29 +122,70 @@ def load_subject_empirical(files: list[TimeseriesFile], cfg: dict, n_expected: i
         if len(nan_cols):
             bad_nodes.update(int(c) for c in nan_cols)
             X = np.nan_to_num(X)
+        # band already applied by the time-series stage (sidecar "band") or declared in the config -> filter only once
+        pre = None
+        if pre_cfg == "auto":
+            side = f.sidecar or f.path.with_suffix(".json")
+            if side and Path(side).exists():
+                pre = json.loads(Path(side).read_text()).get("band")
+        elif pre_cfg:
+            pre = list(pre_cfg)
+        apply_band = band
+        if pre and band and np.allclose(np.asarray(pre, float), np.asarray(band, float), rtol=0.05):
+            apply_band = None            # data already carry exactly this pass-band: no second pass
+        elif pre and band:
+            LOG.warning("%s: data pre-filtered at %s but model.filter_band is %s (filtered a second time)", f.path.name, pre, band)
         if X.shape[0] < min_vol:
             LOG.warning("%s: only %d volumes (< %d), run skipped", f.path.name, X.shape[0], min_vol)
             continue
         if X.shape[0] <= tau + 2:
             continue
-        m = empirical_moments(X, float(tr), band, tau, freq_band, smooth)
+        m = empirical_moments(X, float(tr), apply_band, tau, freq_band, smooth)
         fcs.append(m["FC"])
         covs.append(m["COVtau"])
+        if len(taus) > 1:
+            covs_multi.append([lagged_correlation(m["filtered"], t) for t in taus])
         specs.append(m["spectrum"])
         fcds.append(fcd_distribution(m["filtered"], int(fcd_cfg.get("window_tr", 30)), int(fcd_cfg.get("step_tr", 3))))
         metas.append(m["metastability"])
         nvols.append(m["n_volumes"])
         trs.append(float(tr))
         used.append(str(f.path))
+        filtered_runs.append(m["filtered"])
     if not fcs:
         raise ValueError("no usable runs")
     if len(set(np.round(trs, 4))) > 1:
         LOG.warning("runs with different TR (%s); using the first for the model", trs)
     freqs, P = average_spectra(specs)
     f_peak, _ = peak_frequencies(None, trs[0], freq_band, smooth, spectrum=(freqs, P))
+    halves = split_halves(filtered_runs, tau, min_volumes=max(40, min_vol // 2))
     return {"FC": np.mean(fcs, 0), "COVtau": np.mean(covs, 0), "f_peak": f_peak, "spectrum": (freqs, P),
             "fcd": np.concatenate(fcds), "metastability": float(np.mean(metas)), "n_volumes": int(np.mean(nvols)),
-            "tr": trs[0], "n_runs": len(fcs), "files": used, "bad_nodes": sorted(bad_nodes)}
+            "tr": trs[0], "n_runs": len(fcs), "files": used, "bad_nodes": sorted(bad_nodes), "halves": halves,
+            "filtered_runs": filtered_runs, "taus": taus,
+            "COVtaus": [np.mean([c[k] for c in covs_multi], 0) for k in range(len(taus))] if covs_multi else [np.mean(covs, 0)]}
+
+
+def split_halves(filtered_runs: list[np.ndarray], tau: int, min_volumes: int = 40) -> list[dict] | None:
+    """Two independent halves of a participant's data for held-out validation: odd/even runs when there are
+    at least two runs, otherwise the first/second half of the single run.  None if too short."""
+    from .models.signal import functional_connectivity, lagged_correlation
+
+    if not filtered_runs:
+        return None
+    if len(filtered_runs) >= 2:
+        parts = [filtered_runs[0::2], filtered_runs[1::2]]
+    else:
+        x = filtered_runs[0]
+        h = x.shape[0] // 2
+        if h < min_volumes:
+            return None
+        parts = [[x[:h]], [x[h:]]]
+    out = []
+    for runs in parts:
+        out.append({"FC": np.mean([functional_connectivity(r) for r in runs], 0), "COVtau": np.mean([lagged_correlation(r, tau) for r in runs], 0),
+                    "n_volumes": int(sum(r.shape[0] for r in runs)), "filtered_runs": list(runs)})
+    return out
 
 
 def group_empirical(subjects: list[Subject], freq_band, smooth: float) -> dict:
@@ -150,9 +196,13 @@ def group_empirical(subjects: list[Subject], freq_band, smooth: float) -> dict:
     tr = float(pd.Series([e["tr"] for e in emps]).mode().iloc[0])
     freqs, P = average_spectra([e["spectrum"] for e in emps])
     f_peak, _ = peak_frequencies(None, tr, freq_band, smooth, spectrum=(freqs, P))
-    return {"FC": np.mean([e["FC"] for e in emps], 0), "COVtau": np.mean([e["COVtau"] for e in emps], 0), "f_peak": f_peak,
-            "spectrum": (freqs, P), "fcd": np.concatenate([e["fcd"] for e in emps]), "metastability": float(np.mean([e["metastability"] for e in emps])),
-            "n_volumes": int(np.mean([e["n_volumes"] for e in emps])), "tr": tr, "n_subjects": len(emps)}
+    out = {"FC": np.mean([e["FC"] for e in emps], 0), "COVtau": np.mean([e["COVtau"] for e in emps], 0), "f_peak": f_peak,
+           "spectrum": (freqs, P), "fcd": np.concatenate([e["fcd"] for e in emps]), "metastability": float(np.mean([e["metastability"] for e in emps])),
+           "n_volumes": int(np.mean([e["n_volumes"] for e in emps])), "tr": tr, "n_subjects": len(emps),
+           "filtered_runs": [r for e in emps for r in e.get("filtered_runs", [])], "taus": emps[0].get("taus", [1])}
+    if all("COVtaus" in e for e in emps):
+        out["COVtaus"] = [np.mean([e["COVtaus"][k] for e in emps], 0) for k in range(len(emps[0]["COVtaus"]))]
+    return out
 
 
 # --------------------------------------------------------------------------- structural connectivity
@@ -212,7 +262,7 @@ def run_search(model: str, SC: np.ndarray, emp: dict, cfg: dict, out_base: Path,
     a_values = linspace_spec(s.get("a")) if s.get("a") is not None else None
     metric = s.get("metric", "fit_rmse")
     df, best, info = adaptive_search(model, SC, _omega(emp), emp, emp["tr"], G_values, a_values, m.get("filter_band"), search_cfg=s,
-                                     tau_tr=int(m.get("tau_tr", 1)), beta=float(m.get("beta", 0.02)), dt=float(m.get("dt", 0.1)),
+                                     tau_tr=_first_tau(m), beta=float(m.get("beta", 0.02)), dt=float(m.get("dt", 0.1)),
                                      n_sim=int(s.get("n_sim", 1)), seed=int(cfg_get(cfg, "model.nonlinear.seed", 0)),
                                      transient_s=float(m.get("transient_s", 100.0)), filter_consistent=bool(cfg_get(cfg, "model.linear.filter_consistent", True)),
                                      metric=metric, fcd_cfg=m.get("fcd", {}), n_jobs=n_jobs, use_numba=cfg_get(cfg, "model.nonlinear.use_numba", "auto"),
@@ -235,20 +285,26 @@ def run_search(model: str, SC: np.ndarray, emp: dict, cfg: dict, out_base: Path,
     return best
 
 
+def _first_tau(m: dict) -> int:
+    t = m.get("tau_tr", 1)
+    return int(t[0]) if isinstance(t, (list, tuple)) else int(t)
+
+
 def _scalar_a(m: dict) -> float:
     a = m.get("a", -0.02)
     return float(np.mean(a)) if isinstance(a, (list, tuple, np.ndarray)) else float(a)
 
 
 def fit_one(model: str, emp: dict, SC: np.ndarray, G: float, a, cfg: dict, atlas: Atlas, C_init: np.ndarray | None = None,
-            verbose: int = 0, omega_override: np.ndarray | None = None) -> dict:
+            verbose: int = 0, omega_override: np.ndarray | None = None, C_prior: np.ndarray | None = None,
+            lambda_prior: float | None = None) -> dict:
     """Fit EC of one model to one set of empirical statistics.  Returns a dict of results.
 
     C_init / omega_override (e.g. from the linear fit) seed the non-linear model."""
     m = _model_cfg(cfg)
     N = SC.shape[0]
     tr = float(emp["tr"])
-    tau = int(m.get("tau_tr", 1))
+    tau = _first_tau(m)
     beta = float(m.get("beta", 0.02))
     band = m.get("filter_band")
     sc_max = float(cfg_get(cfg, "sc.sc_max", 0.2))
@@ -266,15 +322,46 @@ def fit_one(model: str, emp: dict, SC: np.ndarray, G: float, a, cfg: dict, atlas
         lc = m.get("linear", {})
         method = lc.get("method", "gradient")
         C0 = (C_init if C_init is not None else initial_ec(SC, N, mask, gcfg.get("init", "sc"), sc_max))
-        if method == "gradient":
+        taus = [int(t) for t in emp.get("taus", [tau])]
+        COV_list = emp.get("COVtaus", [emp["COVtau"]])
+        if method == "whittle":
+            from .models.whittle import fit_linear_whittle
+
+            runs = emp.get("filtered_runs") or []
+            if not runs:
+                raise ValueError("whittle method needs the filtered time series (emp['filtered_runs'])")
+            C0g = C0 * (G if C_init is None else 1.0)
+            prior = C_prior if C_prior is not None else C0g
+            lam = float(lc.get("lambda_sc", 0.0)) if lambda_prior is None else float(lambda_prior)
+            if lam > 0:
+                lam = lam * N * N / max(float(np.sum(prior ** 2)), 1e-12)
+            out["lambda_prior"] = float(lambda_prior) if lambda_prior is not None else float(lc.get("lambda_sc", 0.0))
+            res = fit_linear_whittle(runs, tr, C0g, mask, omega, band, a=a, beta=beta, fit_a=lc.get("fit_a", "none"), fit_omega=bool(lc.get("fit_omega", True)),
+                                     fit_beta=str(lc.get("fit_beta", "global")), fit_obs_noise=str(lc.get("fit_obs_noise", "global")),
+                                     lambda_prior=lam, C_prior=prior, max_iter=int(lc.get("max_iter", 500)),
+                                     verbose=verbose, FC_emp=emp["FC"], COVtau_emp=emp["COVtau"], tau_tr=tau,
+                                     n_alias=int(lc.get("whittle_n_alias", 1)), filter_gain_correction=bool(lc.get("filter_consistent", True)))
+            EC = res.C
+            out.update({"method": "whittle", "metrics": res.metrics, "history": res.history, "FC_sim": res.FC_sim, "COVtau_sim": res.COVtau_sim,
+                        "a_fit": res.a.tolist(), "omega_fit": res.omega.tolist(), "beta_fit": res.beta.tolist(),
+                        "obs_noise_fit": (res.obs_noise.tolist() if res.obs_noise is not None else None), "n_iter": res.n_iter,
+                        "success": res.success, "message": res.message, "bound_hits": res.bound_hits})
+        elif method == "gradient":
             C0g = C0 * (G if C_init is None else 1.0)  # G absorbed into C
-            res = fit_linear_gradient(emp["FC"], emp["COVtau"], C0g, mask, omega, tr, tau, a, beta, band if lc.get("filter_consistent", True) else None,
-                                      w_fc=float(lc.get("w_fc", 1.0)), w_tau=float(lc.get("w_tau", 1.0)), lambda_sc=float(lc.get("lambda_sc", 0.0)),
-                                      C_prior=C0g, lambda_l1=float(lc.get("lambda_l1", 0.0)), fit_a=lc.get("fit_a", "none"),
+            prior = C_prior if C_prior is not None else C0g
+            lam = float(lc.get("lambda_sc", 0.0)) if lambda_prior is None else float(lambda_prior)
+            if lam > 0:  # relative penalty: lambda * N^2 * ||C - prior||^2 / ||prior||^2 (see docs/methods.md)
+                lam = lam * N * N / max(float(np.sum(prior ** 2)), 1e-12)
+            out["lambda_prior"] = float(lambda_prior) if lambda_prior is not None else float(lc.get("lambda_sc", 0.0))
+            res = fit_linear_gradient(emp["FC"], COV_list if len(taus) > 1 else emp["COVtau"], C0g, mask, omega, tr, taus if len(taus) > 1 else tau, a, beta,
+                                      band if lc.get("filter_consistent", True) else None,
+                                      w_fc=float(lc.get("w_fc", 1.0)), w_tau=float(lc.get("w_tau", 1.0)), lambda_sc=lam,
+                                      C_prior=prior, lambda_l1=float(lc.get("lambda_l1", 0.0)), fit_a=lc.get("fit_a", "none"),
                                       fit_omega=bool(lc.get("fit_omega", True)), max_iter=int(lc.get("max_iter", 500)), verbose=verbose)
             EC = res.C
             out.update({"method": "gradient", "metrics": res.metrics, "history": res.history, "FC_sim": res.FC_sim, "COVtau_sim": res.COVtau_sim,
-                        "a_fit": res.a.tolist(), "omega_fit": res.omega.tolist(), "n_iter": res.n_iter, "success": res.success, "message": res.message})
+                        "a_fit": res.a.tolist(), "omega_fit": res.omega.tolist(), "n_iter": res.n_iter, "success": res.success, "message": res.message,
+                        "bound_hits": getattr(res, "bound_hits", {}), "taus": taus})
         else:
             filt = {"band": band} if lc.get("filter_consistent", True) else None
             res = fit_gec(emp["FC"], emp["COVtau"], C0, lambda C: analytic_moments(C, G, a, omega, tr, tau, beta, filt), mask, G=G,
@@ -355,14 +442,82 @@ def save_fit(res: dict, base: Path, names: list[str], SC: np.ndarray | None, tit
 
 
 def _fit_participant_job(model: str, sub: Subject, G: float, a, cfg: dict, atlas: Atlas, base: Path, C_init: np.ndarray | None, title: str,
-                         omega_init: np.ndarray | None = None) -> dict:
-    res = fit_one(model, sub.emp, sub.SC, G, a, cfg, atlas, C_init=C_init, omega_override=omega_init)
+                         omega_init: np.ndarray | None = None, C_prior: np.ndarray | None = None, lambda_prior: float | None = None,
+                         cross_validate: bool = False) -> dict:
+    res = fit_one(model, sub.emp, sub.SC, G, a, cfg, atlas, C_init=C_init, omega_override=omega_init, C_prior=C_prior, lambda_prior=lambda_prior)
+    if cross_validate and model == "linear":
+        cv = _fit_eval_halves(model, sub, G, a, cfg, atlas, C_prior if C_prior is not None else C_init, lambda_prior, omega_init=omega_init)
+        if cv:
+            res["metrics"].update(cv)
+            res["cross_validation"] = "split-half (odd/even runs or first/second half)"
+        else:
+            res["cross_validation"] = "not possible (single short run)"
     res["FC_emp"], res["COVtau_emp"] = sub.emp["FC"], sub.emp["COVtau"]
     res["participant_id"], res["group"], res["sc_source"] = sub.sub, sub.group, sub.sc_source
     meta = save_fit(res, base, atlas.region_names, sub.SC, title)
     row = {"participant_id": sub.sub, "group": sub.group, "model": model, "method": res.get("method"), "G": res.get("G_used", res["G_search"]),
-           "G_eff": res["G_eff"], "n_volumes": sub.emp["n_volumes"], "n_runs": sub.emp.get("n_runs"), "elapsed_s": res["elapsed_s"], **res["metrics"]}
+           "G_eff": res["G_eff"], "n_volumes": sub.emp["n_volumes"], "n_runs": sub.emp.get("n_runs"), "elapsed_s": res["elapsed_s"],
+           "lambda_prior": res.get("lambda_prior"), **res["metrics"]}
     return {"row": row, "EC": res["EC"], "EC_norm": res["EC_norm"], "omega": np.asarray(res["omega_fit"], float) if res.get("omega_fit") else None, "sub": sub.sub}
+
+
+
+# --------------------------------------------------------------------------- hierarchical fitting / validation
+def _fit_eval_halves(model: str, sub: Subject, G: float, a, cfg: dict, atlas: Atlas, prior: np.ndarray | None, lam: float | None,
+                     max_iter: int | None = None, omega_init=None) -> dict | None:
+    """Fit on one half of a participant's data, evaluate on the other (both directions); mean held-out metrics."""
+    halves = sub.emp.get("halves")
+    if not halves:
+        return None
+    cfg_cv = cfg if max_iter is None else {**cfg, "model": {**cfg["model"], "linear": {**cfg["model"].get("linear", {}), "max_iter": int(max_iter)}}}
+    out = {"cv_fit_rmse": [], "cv_fc_corr": [], "cv_train_fit_rmse": []}
+    for tr_i, te_i in ((0, 1), (1, 0)):
+        emp_tr = {**sub.emp, "FC": halves[tr_i]["FC"], "COVtau": halves[tr_i]["COVtau"], "n_volumes": halves[tr_i]["n_volumes"],
+                  "filtered_runs": halves[tr_i].get("filtered_runs", []), "COVtaus": [halves[tr_i]["COVtau"]], "taus": [sub.emp.get("taus", [1])[0]]}
+        res = fit_one(model, emp_tr, sub.SC, G, a, cfg_cv, atlas, C_init=prior, C_prior=prior, lambda_prior=lam, omega_override=omega_init)
+        te = fit_error(halves[te_i]["FC"], res["FC_sim"], halves[te_i]["COVtau"], res["COVtau_sim"])
+        out["cv_fit_rmse"].append(te["fit_rmse"])
+        out["cv_fc_corr"].append(te["fc_corr"])
+        out["cv_train_fit_rmse"].append(res["metrics"]["fit_rmse"])
+    return {k: float(np.mean(v)) for k, v in out.items()}
+
+
+def select_lambda_cv(subjects: list, G: float, a, cfg: dict, atlas: Atlas, priors: dict, prior_for, n_jobs: int, out_path: Path) -> tuple[float, pd.DataFrame]:
+    """Choose the shrinkage weight towards the group EC by split-half cross-validation (one value for everybody)."""
+    gcfg = cfg.get("group", {})
+    grid = [float(x) for x in cfg_get(cfg, "model.linear.lambda_grid", [0.0, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0])]
+    subs_cv = [s for s in subjects if s.emp.get("halves")][: int(gcfg.get("cv_max_participants", 8))]
+    if not subs_cv:
+        LOG.warning("cross-validation impossible (no participant has two halves / enough volumes); lambda_group = 0")
+        return 0.0, pd.DataFrame()
+    max_iter = int(gcfg.get("cv_max_iter", 200))
+    rows: list[dict] = []
+
+    def _run(lams):
+        jobs = [(lam, s) for lam in lams for s in subs_cv]
+        res = Parallel(n_jobs=n_jobs)(delayed(_fit_eval_halves)("linear", s, G, a, cfg, atlas, prior_for(s, priors), lam, max_iter) for lam, s in jobs)
+        rows.extend({"lambda_group": lam, "participant_id": s.sub, **r} for (lam, s), r in zip(jobs, res) if r)
+
+    _run(grid)
+    for _ in range(int(gcfg.get("cv_max_extensions", 2))):  # optimum at the top of the grid -> extend upwards
+        df = pd.DataFrame(rows)
+        summ = df.groupby("lambda_group")["cv_fit_rmse"].mean()
+        if float(summ.idxmin()) < float(summ.index.max()) or summ.index.max() <= 0:
+            break
+        new = [float(summ.index.max()) * f for f in (3.0, 10.0)]
+        LOG.warning("lambda_group optimum at the top of the grid (%g): extending to %s", summ.index.max(), new)
+        _run(new)
+    df = pd.DataFrame(rows)
+    summ = df.groupby("lambda_group")[["cv_fit_rmse", "cv_fc_corr", "cv_train_fit_rmse"]].mean().reset_index()
+    summ["n_participants"] = df.groupby("lambda_group")["participant_id"].count().values
+    best = float(summ.loc[summ["cv_fit_rmse"].idxmin(), "lambda_group"])
+    if best >= float(summ["lambda_group"].max()) and best > 0:
+        LOG.warning("lambda_group = %g is still the largest value tried; the participant ECs are close to the group EC", best)
+    ensure_dir(out_path.parent)
+    summ.to_csv(out_path, sep="\t", index=False, float_format="%.6g")
+    df.to_csv(str(out_path).replace(".tsv", "_participants.tsv"), sep="\t", index=False, float_format="%.6g")
+    LOG.info("lambda_group by split-half CV: %s  (held-out fit_rmse per lambda: %s)", best, dict(zip(summ["lambda_group"].round(4), summ["cv_fit_rmse"].round(4))))
+    return best, summ
 
 
 # --------------------------------------------------------------------------- main stage
@@ -436,10 +591,41 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
                     a = float(best_group["a"])
         G_group = float(G_fixed) if G_fixed is not None else (float(best_group["G"]) if best_group else 1.0)
         summary.setdefault("search", {})[model] = {"G_group": G_group, "a": a if np.isscalar(a) else list(a), "best": best_group}
+        # ---- group sets (needed early for hierarchical fitting)
+        gcfg = cfg.get("group", {})
+        group_sets = {"all": ok} if gcfg.get("pooled", True) else {}
+        for g in groups:
+            members = [s for s in ok if s.group == g]
+            if len(members) >= int(gcfg.get("min_subjects", 2)):
+                group_sets[g] = members
+        group_emp = {g: (emp_all if g == "all" else group_empirical(mem, freq_band, smooth)) for g, mem in group_sets.items()}
+        group_SC = {g: (SC_group if g == "all" else prepare_sc(np.mean([s.SC for s in mem], 0), {**cfg.get("sc", {}), "symmetrize": False})) for g, mem in group_sets.items()}
+        group_fit_results: dict[str, dict] = {}
+        hier = bool(gcfg.get("hierarchical", True)) and model == "linear" and not group_only and gcfg.get("fit_group_average", True) and group_sets
+        priors: dict[str, dict] = {}
+        lam_group: float | None = None
+        if hier:
+            LOG.info("hierarchical fitting: group-level EC first, participants initialised from and shrunk towards it")
+            for gname in group_sets:
+                res_g = fit_one(model, group_emp[gname], group_SC[gname], G_group, a, cfg, atlas, verbose=verbose)
+                group_fit_results[gname] = res_g
+                priors[gname] = {"EC": res_g["EC"], "omega": np.asarray(res_g["omega_fit"], float) if res_g.get("omega_fit") else None}
+
+            def prior_for(sub, pri=priors):
+                key = sub.group if (gcfg.get("hierarchical_prior", "own") == "own" and sub.group in pri) else "all"
+                return pri[key]["EC"] if key in pri else None
+
+            lam_cfg = cfg_get(cfg, "model.linear.lambda_group", "auto")
+            if str(lam_cfg) == "auto":
+                lam_group, _ = select_lambda_cv(ok, G_group, a, cfg, atlas, priors, prior_for, n_jobs, mdir / f"cv_lambda_atlas-{aslug}_model-{tag}.tsv")
+            else:
+                lam_group = float(lam_cfg)
+            summary.setdefault("hierarchical", {})[model] = {"lambda_group": lam_group, "prior": gcfg.get("hierarchical_prior", "own"), "groups": list(priors)}
         # ---- participant-level
         rows = []
         ECs: dict[str, np.ndarray] = {}
         ECns: dict[str, np.ndarray] = {}
+        cross_validate = bool(gcfg.get("cross_validate", True)) and model == "linear"
         if not group_only:
             jobs = []
             for s in ok:
@@ -450,8 +636,15 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
                 use_lin = model == "nonlinear" and cfg_get(cfg, "model.nonlinear.init", "linear") == "linear" and s.sub in linear_results
                 C_init = linear_results[s.sub]["EC"] if use_lin else None
                 om_init = linear_results[s.sub].get("omega") if use_lin else None
+                C_prior_s, lam_s = None, None
+                if hier:
+                    C_prior_s = prior_for(s)
+                    C_init = C_prior_s
+                    key = s.group if (gcfg.get("hierarchical_prior", "own") == "own" and s.group in priors) else "all"
+                    om_init = priors[key].get("omega") if key in priors else None
+                    lam_s = lam_group
                 base = mdir / s.sub / f"{s.sub}_atlas-{aslug}_model-{tag}"
-                jobs.append(delayed(_fit_participant_job)(model, s, G_s, a, cfg, atlas, base, C_init, f"{s.sub} {model} Hopf", om_init))
+                jobs.append(delayed(_fit_participant_job)(model, s, G_s, a, cfg, atlas, base, C_init, f"{s.sub} {model} Hopf", om_init, C_prior_s, lam_s, cross_validate))
             results = Parallel(n_jobs=n_jobs)(jobs)
             for r in results:
                 rows.append(r["row"])
@@ -476,18 +669,12 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
         # ---- group-level
         if participants_only:
             continue
-        gcfg = cfg.get("group", {})
-        group_sets = {"all": ok} if gcfg.get("pooled", True) else {}
-        for g in groups:
-            members = [s for s in ok if s.group == g]
-            if len(members) >= int(gcfg.get("min_subjects", 2)):
-                group_sets[g] = members
         grows = []
         for gname, members in group_sets.items():
             gbase = mdir / f"group-{slug(gname)}" / f"group-{slug(gname)}_atlas-{aslug}_model-{tag}"
             ensure_dir(gbase.parent)
-            emp_g = emp_all if gname == "all" else group_empirical(members, freq_band, smooth)
-            SC_g = SC_group if gname == "all" else prepare_sc(np.mean([s.SC for s in members], 0), {**cfg.get("sc", {}), "symmetrize": False})
+            emp_g = group_emp[gname]
+            SC_g = group_SC[gname]
             save_matrix(Path(str(gbase) + "_desc-empiricalFC_connectivity.tsv"), emp_g["FC"], names)
             save_matrix(Path(str(gbase) + "_desc-empiricalCOVtau_connectivity.tsv"), emp_g["COVtau"], names)
             entry: dict = {"n": len(members), "members": [s.sub for s in members]}
@@ -495,7 +682,7 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
                 use_lin = model == "nonlinear" and cfg_get(cfg, "model.nonlinear.init", "linear") == "linear" and gname in linear_group_results
                 C_init = linear_group_results[gname]["EC"] if use_lin else None
                 om_init = linear_group_results[gname].get("omega") if use_lin else None
-                res = fit_one(model, emp_g, SC_g, G_group, a, cfg, atlas, C_init=C_init, verbose=verbose, omega_override=om_init)
+                res = group_fit_results.get(gname) or fit_one(model, emp_g, SC_g, G_group, a, cfg, atlas, C_init=C_init, verbose=verbose, omega_override=om_init)
                 res["FC_emp"], res["COVtau_emp"] = emp_g["FC"], emp_g["COVtau"]
                 res["group"] = gname
                 meta = save_fit(res, gbase, names, SC_g, f"group {gname} {model} Hopf (fit to group-average statistics)")

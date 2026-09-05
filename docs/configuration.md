@@ -62,3 +62,12 @@ side (same step, `extend_factor` x span, up to `max_extensions`, capped by `G_mi
 parabolic fit; `continuous` switches on a continuous (G, a) optimisation afterwards.  `G = 0` is never
 selected unless `allow_zero_G: true`.  The chosen values and their provenance (`source`) are stored in
 `*_desc-search.json`.
+
+## Hierarchical fitting and validation
+
+`group.hierarchical` (group EC first, participants initialised from and shrunk towards it),
+`group.hierarchical_prior` (own | pooled), `model.linear.lambda_group` (auto = split-half cross-validation
+over `model.linear.lambda_grid`; `group.cv_max_participants`, `group.cv_max_iter`, `group.cv_max_extensions`),
+`group.cross_validate` (held-out metrics per participant).  `input.prefiltered_band: auto` reads the band
+already applied by `hopfec timeseries` from the sidecar so the data are not filtered twice.
+Linear estimators: `model.linear.method: gradient | whittle | gec`; `model.tau_tr` may be a list of lags.

@@ -80,17 +80,19 @@ def filter_gain(freqs: np.ndarray, tr: float, band, order: int = 2) -> np.ndarra
 
 
 def whittle_loss_grad(C: np.ndarray, a, omega: np.ndarray, q: np.ndarray, freqs: np.ndarray, I: np.ndarray, return_S: bool = False,
-                      gain: np.ndarray | None = None, tr: float | None = None, n_alias: int = 0):
-    """Whittle loss and gradients (dC, da, domega, dq) with q_j = beta_j^2 (noise variance of node j).
+                      gain: np.ndarray | None = None, tr: float | None = None, n_alias: int = 0, r: np.ndarray | None = None):
+    """Whittle loss and gradients (dC, da, domega, dq[, dr]) with q_j = beta_j^2 (noise variance of node j).
 
     gain[f] multiplies the model spectrum (filter response |B|^2 of the data's band-pass); n_alias > 0 adds the
-    aliased images S(f + n/TR), n = -n_alias..n_alias, of the TR-sampled process."""
+    aliased images S(f + n/TR), n = -n_alias..n_alias, of the TR-sampled process; r_j is a white
+    observation-noise level added to the diagonal of the model spectrum (measurement noise)."""
     N = C.shape[0]
     A = build_jacobian(C, 1.0, a, omega)
     Qd = np.concatenate([q, q])
     loss = 0.0
     G_A = np.zeros((2 * N, 2 * N))
     g_q = np.zeros(N)
+    g_r = np.zeros(N)
     S_all = [] if return_S else None
     I2 = np.eye(2 * N)
     gain = np.ones(len(freqs)) if gain is None else gain
@@ -108,6 +110,8 @@ def whittle_loss_grad(C: np.ndarray, a, omega: np.ndarray, q: np.ndarray, freqs:
         S_full *= gf
         S = S_full[:N, :N]
         S = 0.5 * (S + S.conj().T)
+        if r is not None:
+            S = S + np.diag(r)
         try:
             cf = la.cho_factor(S)
         except la.LinAlgError:
@@ -118,6 +122,8 @@ def whittle_loss_grad(C: np.ndarray, a, omega: np.ndarray, q: np.ndarray, freqs:
         SinvI = Sinv @ If
         loss += logdet + np.trace(SinvI).real
         G_S = Sinv - SinvI @ Sinv  # dL/dS (Hermitian)
+        if r is not None:
+            g_r += np.real(np.diag(G_S))
         P = np.zeros((2 * N, 2 * N), complex)
         P[:N, :N] = G_S * gf
         for H, HQ in zip(Hs, HQs):
@@ -129,7 +135,7 @@ def whittle_loss_grad(C: np.ndarray, a, omega: np.ndarray, q: np.ndarray, freqs:
         if return_S:
             S_all.append(S)
     gC, ga, gw = grads_to_params(G_A, N, 1.0)
-    out = (float(loss), gC, ga, gw, g_q)
+    out = (float(loss), gC, ga, gw, g_q) + ((g_r,) if r is not None else ())
     return out + (np.array(S_all),) if return_S else out
 
 
@@ -150,13 +156,15 @@ class WhittleFitResult:
     metrics: dict = field(default_factory=dict)
     elapsed_s: float = 0.0
     bound_hits: dict = field(default_factory=dict)
+    obs_noise: np.ndarray | None = None
 
 
 def fit_linear_whittle(ts_list: list[np.ndarray] | None, tr: float, C0: np.ndarray, mask: np.ndarray, omega: np.ndarray, band,
                        a=-0.02, beta: float = 0.02, periodogram: tuple | None = None, fit_a: str = "none", fit_omega: bool = True,
-                       fit_beta: str = "node", lambda_prior: float = 0.0, C_prior: np.ndarray | None = None, max_iter: int = 500,
+                       fit_beta: str = "global", lambda_prior: float = 0.0, C_prior: np.ndarray | None = None, max_iter: int = 500,
                        verbose: int = 0, FC_emp: np.ndarray | None = None, COVtau_emp: np.ndarray | None = None, tau_tr: int = 1,
-                       a_bounds=(-2.0, -1e-3), filter_gain_correction: bool = True, n_alias: int = 1) -> WhittleFitResult:
+                       a_bounds=(-2.0, -1e-3), filter_gain_correction: bool = True, n_alias: int = 1,
+                       fit_obs_noise: str = "global") -> WhittleFitResult:
     """Maximum Whittle likelihood over C (>= 0 on mask) [+ a, omega, per-node noise]; periodogram from ts_list or given."""
     t0 = time.time()
     N = C0.shape[0]
@@ -179,7 +187,17 @@ def fit_linear_whittle(ts_list: list[np.ndarray] | None, tr: float, C0: np.ndarr
     n_a = 0 if fit_a == "none" else (1 if fit_a == "global" else N)
     n_w = N if fit_omega else 0
     n_q = N if fit_beta == "node" else (1 if fit_beta == "global" else 0)
-    q0 = np.full(N, float(beta) ** 2)
+    n_r = N if fit_obs_noise == "node" else (1 if fit_obs_noise == "global" else 0)
+    # scale-matched initial noise variances: model power with q = 1 vs observed in-band power per node
+    # (the data are usually z-scored, so the nominal beta^2 would be orders of magnitude off)
+    _, _, _, _, _, S_unit = whittle_loss_grad(C0, a0, w0, np.ones(N), fsel, Isel, return_S=True, gain=gain, tr=tr, n_alias=n_alias)
+    p_model = np.mean(np.real(np.einsum("fii->fi", S_unit)), axis=0)
+    p_data = np.mean(np.real(np.einsum("fii->fi", Isel)), axis=0)
+    q0 = np.clip(p_data / np.maximum(p_model, 1e-300), 1e-8, 1e2)
+    if fit_beta != "node":
+        q0 = np.full(N, float(np.exp(np.mean(np.log(q0)))))
+    # initial observation-noise level: 1% of the mean in-band diagonal periodogram
+    r0 = float(np.mean(p_data)) * 0.01 + 1e-12
     prior = C_prior if C_prior is not None else C0
 
     def unpack(theta):
@@ -202,14 +220,22 @@ def fit_linear_whittle(ts_list: list[np.ndarray] | None, tr: float, C0: np.ndarr
             q = np.full(N, np.exp(theta[pos])); pos += 1
         else:
             q = q0
-        return C, av, w, q
+        if n_r == N:
+            rr = np.exp(theta[pos:pos + N]); pos += N
+        elif n_r == 1:
+            rr = np.full(N, np.exp(theta[pos])); pos += 1
+        else:
+            rr = None
+        return C, av, w, q, rr
 
     state = {"fev": 0}
     history: list[dict] = []
 
     def fun(theta):
-        C, av, w, q = unpack(theta)
-        loss, gC, ga, gw, gq = whittle_loss_grad(C, av, w, q, fsel, Isel, gain=gain, tr=tr, n_alias=n_alias)
+        C, av, w, q, rr = unpack(theta)
+        outs = whittle_loss_grad(C, av, w, q, fsel, Isel, gain=gain, tr=tr, n_alias=n_alias, r=rr)
+        loss, gC, ga, gw, gq = outs[:5]
+        gr = outs[5] if rr is not None else None
         if lambda_prior > 0:
             d = (C - prior) * mask
             loss += 0.5 * lambda_prior * np.sum(d ** 2)
@@ -227,6 +253,10 @@ def fit_linear_whittle(ts_list: list[np.ndarray] | None, tr: float, C0: np.ndarr
             g[pos:pos + N] = gq * q; pos += N      # d/d log q
         elif n_q == 1:
             g[pos] = float(np.sum(gq * q)); pos += 1
+        if n_r == N:
+            g[pos:pos + N] = gr * rr; pos += N
+        elif n_r == 1:
+            g[pos] = float(np.sum(gr * rr)); pos += 1
         state["fev"] += 1
         state["last_loss"] = loss
         return loss, g
@@ -237,13 +267,15 @@ def fit_linear_whittle(ts_list: list[np.ndarray] | None, tr: float, C0: np.ndarr
             LOG.info("whittle it %4d loss=%.6g", len(history), history[-1]["loss"])
 
     theta0 = np.concatenate([C0[idx]] + ([np.array([a0.mean()])] if n_a == 1 else []) + ([a0] if n_a == N else [])
-                            + ([w0] if n_w else []) + ([np.log(q0)] if n_q == N else []) + ([np.array([np.log(q0[0])])] if n_q == 1 else []))
-    bounds = [(0.0, None)] * n_c + [tuple(a_bounds)] * n_a + [(1e-4, None)] * n_w + [(np.log(1e-8), np.log(1e2))] * n_q
+                            + ([w0] if n_w else []) + ([np.log(q0)] if n_q == N else []) + ([np.array([np.log(q0[0])])] if n_q == 1 else [])
+                            + ([np.full(N, np.log(r0))] if n_r == N else []) + ([np.array([np.log(r0)])] if n_r == 1 else []))
+    bounds = [(0.0, None)] * n_c + [tuple(a_bounds)] * n_a + [(1e-4, None)] * n_w + [(np.log(1e-8), np.log(1e2))] * n_q + [(np.log(1e-12), np.log(1e3))] * n_r
     res = minimize(fun, theta0, jac=True, method="L-BFGS-B", bounds=bounds, callback=cb,
                    options={"maxiter": int(max_iter), "ftol": 1e-12, "gtol": 1e-8, "maxcor": 20})
-    C, av, w, q = unpack(res.x)
+    C, av, w, q, rr = unpack(res.x)
     out = WhittleFitResult(C=C, a=av, omega=w, beta=np.sqrt(q), loss=float(res.fun), n_iter=int(res.nit), n_fev=state["fev"],
                            success=bool(res.success), message=str(res.message), history=history, elapsed_s=time.time() - t0)
+    out.obs_noise = rr
     # comparability with the moment fits: model FC / lagged correlation at the optimum (mean noise amplitude)
     FC_m, COV_m = analytic_moments(C, 1.0, av, w, tr, tau_tr, float(np.sqrt(q.mean())), filt={"band": band})
     out.FC_sim, out.COVtau_sim = FC_m, COV_m

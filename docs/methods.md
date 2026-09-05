@@ -74,6 +74,33 @@ The heuristic rule improves the FC fit but does not recover the direction of cou
 estimator does.  Reproduce with `tests/test_models.py::test_gradient_fit_recovers_truth` and the
 scripts in the repository history.
 
+## Hierarchical fitting, shrinkage and held-out validation
+
+With `group.hierarchical: true` (default, linear model) the group-average statistics are fitted first;
+every participant is then initialised from the EC of their own group (`hierarchical_prior: own`, or the
+pooled `group-all` EC) and shrunk towards it with the penalty
+`lambda_group * N^2 * ||C - C_group||^2 / ||C_group||^2` (relative, so lambda is comparable across
+atlases).  `lambda_group: auto` chooses the weight by split-half cross-validation (odd/even runs, or
+first/second half of a single run) on up to `cv_max_participants` participants over `lambda_grid`,
+extending the grid upwards when the optimum is its largest value (`cv_lambda_*.tsv`).  With
+`group.cross_validate: true` every participant also gets held-out metrics (`cv_fit_rmse`, `cv_fc_corr`,
+`cv_train_fit_rmse` in the participants table): fit on one half, evaluate on the other.  On synthetic
+ground truth this raised held-out FC correlation from 0.83 (no shrinkage) to 0.90 and the agreement of
+the participant EC with the truth from 0.42 to 0.53–0.58.
+
+## Alternative objectives for the linear model
+
+* **Several lags** — `model.tau_tr: [1, 2, 3]`: the gradient fit matches FC and the lagged correlations
+  at every listed lag (the search, GEC and non-linear fits use the first lag).  Lags beyond ~3 TRs add
+  more noise than direction information.
+* **Whittle likelihood** — `model.linear.method: whittle`: maximum likelihood on the cross-spectral
+  matrices of the data inside the pass-band (all lags at once), with the data's filter response and
+  the aliased spectral images of the TR-sampled process included, a fitted noise amplitude
+  (`fit_beta: global | node | none`) and a white observation-noise floor (`fit_obs_noise`).  Analytic
+  gradients w.r.t. C, a, omega, noise; `lambda_group` shrinkage applies as well.  On synthetic data with
+  strong measurement noise it recovered the truth better than the moment fit (0.57 vs 0.41), without
+  noise slightly worse (0.61 vs 0.70); per-node noise amplitudes overfit and are not the default.
+
 ## Parameter search / error surface
 
 `model.search.G` (and optionally `model.search.a`) define the coarse grid; the homogeneous model

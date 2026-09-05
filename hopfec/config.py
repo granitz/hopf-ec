@@ -46,6 +46,7 @@ DEFAULTS: dict[str, Any] = {
         "halfpipe_feature": None,     # HALFpipe feature name whose atlas time series to use
         "halfpipe_setting": None,     # HALFpipe setting name for preprocessed BOLD
         "timeseries_glob": None,      # explicit glob for ready-made time series TSVs ({sub} placeholder)
+        "prefiltered_band": "auto",   # band already applied to the input time series: auto (sidecar), null (none) or [lo, hi]
     },
     "atlas": {"name": None, "file": None, "labels": None, "allow_space_mismatch": False},
     "fmriprep": {
@@ -118,7 +119,7 @@ DEFAULTS: dict[str, Any] = {
         "filter_band": [0.008, 0.08],   # band-pass applied to empirical (and simulated) BOLD
         "freq_band": None,              # band for node peak-frequency estimation (default = filter_band)
         "spectrum_smoothing_hz": 0.01,
-        "tau_tr": 1,                    # lag (in TRs) for the time-shifted covariance
+        "tau_tr": 1,                    # lag(s) in TRs for the time-shifted covariance; a list (e.g. [1, 2, 3]) fits several lags (gradient method)
         "a": -0.02,                     # bifurcation parameter (scalar or per-node list)
         "beta": 0.02,                   # noise amplitude
         "dt": 0.1,                      # integration step (s), adjusted so TR is an integer number of steps
@@ -158,11 +159,16 @@ DEFAULTS: dict[str, Any] = {
         },
         "linear": {
             "enabled": True,
-            "method": "gradient",       # gradient (exact-gradient L-BFGS, recommended) | gec (heuristic iteration)
+            "method": "gradient",       # gradient (FC + lagged-correlation, exact gradient) | whittle (cross-spectral likelihood) | gec (heuristic)
+            "fit_beta": "global",       # whittle: noise amplitude global (recommended) | node | none
+            "fit_obs_noise": "global",  # whittle: white observation-noise floor global | node | none
+            "whittle_n_alias": 1,       # whittle: aliased spectral images included
             "filter_consistent": True,
             "fit_omega": True,          # co-estimate node frequencies (initialised from spectral peaks)
             "fit_a": "none",            # none | global | node
-            "lambda_sc": 0.0,           # L2 pull towards the (scaled) structural prior
+            "lambda_sc": 0.0,           # L2 pull towards the (scaled) structural prior (non-hierarchical fits)
+            "lambda_group": "auto",     # hierarchical: shrinkage towards the group EC; auto = split-half cross-validation
+            "lambda_grid": [0.0, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0],
             "lambda_l1": 0.0,
             "w_fc": 1.0,
             "w_tau": 1.0,
@@ -187,7 +193,13 @@ DEFAULTS: dict[str, Any] = {
     },
     "group": {"fit_group_average": True, "mean_of_participants": True, "pooled": True, "min_subjects": 2, "compare": True,
               "compare_on": "ECnorm",    # ECnorm (max-normalised, scale-free) | EC (absolute coupling)
-              "fdr_q": 0.05, "n_perm": 0},
+              "fdr_q": 0.05, "n_perm": 0,
+              "hierarchical": True,       # linear model: group EC first; participants start from it and are shrunk towards it
+              "hierarchical_prior": "own",  # own (participant's group EC) | pooled (group-all EC)
+              "cross_validate": True,     # held-out (split-half) fit metrics per participant (linear model)
+              "cv_max_participants": 8,   # participants used to choose lambda_group by cross-validation
+              "cv_max_iter": 200,
+              "cv_max_extensions": 2},    # extend the lambda grid upwards when the optimum is its largest value
     "compute": {"n_jobs": -1, "backend": "loky", "threads_per_job": 1},
     "stages": ["timeseries", "sc", "fit"],
 }
@@ -405,7 +417,7 @@ model:
     mask: sc_plus_homotopic
   linear:
     enabled: true
-    method: gradient                # gradient (exact gradient, L-BFGS-B) | gec (heuristic GEC iteration)
+    method: gradient                # gradient (FC + lagged corr.) | whittle (cross-spectral likelihood) | gec (heuristic)
     filter_consistent: true
     fit_omega: true                 # co-estimate node frequencies (recommended)
     fit_a: none                     # none | global | node
@@ -423,6 +435,8 @@ model:
 group:
   fit_group_average: true
   mean_of_participants: true
+  hierarchical: true                # group EC first, then participants initialised from / shrunk towards it (lambda_group)
+  cross_validate: true              # split-half held-out fit metrics per participant
   compare: true
   compare_on: ECnorm                # edge-wise group tests on the max-normalised EC (or: EC)
   fdr_q: 0.05

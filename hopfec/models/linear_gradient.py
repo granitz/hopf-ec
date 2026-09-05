@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from typing import Sequence
 
 import numpy as np
 from scipy import linalg as la
@@ -118,6 +119,90 @@ def loss_and_grad_moments(S0: np.ndarray, St: np.ndarray, N: int, FC_emp: np.nda
     return loss, G_S0, G_St, R, Ct
 
 
+def forward_moments_multi(A: np.ndarray, beta: float, tr: float, taus: Sequence[int], h2: np.ndarray):
+    """Filter-consistent covariance at lag 0 and at every lag in taus (full 2N x 2N); shared recursion."""
+    taus = [int(t) for t in taus]
+    Sigma = lyapunov_covariance(A, beta)
+    P = la.expm(A * tr)
+    M = len(h2) - 1
+    K = max(taus) + M
+    c = [Sigma]
+    for _ in range(K):
+        c.append(P @ c[-1])
+    S0 = h2[0] * c[0]
+    for k in range(1, M + 1):
+        S0 = S0 + h2[k] * (c[k] + c[k].T)
+    Sts = []
+    for tau in taus:
+        St = np.zeros_like(Sigma)
+        for k in range(0, tau + M + 1):
+            St = St + h2[abs(tau - k)] * c[k]
+        for kp in range(1, M - tau + 1):
+            St = St + h2[kp + tau] * c[kp].T
+        Sts.append(St)
+    return S0, Sts, {"c": c, "P": P, "Sigma": Sigma, "K": K, "M": M, "taus": taus}
+
+
+def backward_moments_multi(G_S0: np.ndarray, G_Sts: Sequence[np.ndarray], A: np.ndarray, tr: float, h2: np.ndarray, cache: dict) -> np.ndarray:
+    c, P, Sigma, K, M, taus = cache["c"], cache["P"], cache["Sigma"], cache["K"], cache["M"], cache["taus"]
+    n = A.shape[0]
+    G_c = [np.zeros((n, n)) for _ in range(K + 1)]
+    G_c[0] += h2[0] * G_S0
+    sym0 = G_S0 + G_S0.T
+    for k in range(1, M + 1):
+        G_c[k] += h2[k] * sym0
+    for tau, G_St in zip(taus, G_Sts):
+        for k in range(0, tau + M + 1):
+            G_c[k] += h2[abs(tau - k)] * G_St
+        for kp in range(1, M - tau + 1):
+            G_c[kp] += h2[kp + tau] * G_St.T
+    lam = G_c[K].copy()
+    G_P = np.zeros((n, n))
+    for k in range(K, 0, -1):
+        G_P += lam @ c[k - 1].T
+        lam = G_c[k - 1] + P.T @ lam
+    G_Sigma = 0.5 * (lam + lam.T)
+    _, G_A_P = la.expm_frechet(A.T * tr, G_P, compute_expm=True)
+    G_A = tr * G_A_P
+    Lam = la.solve_continuous_lyapunov(A.T, -G_Sigma)
+    return G_A + 2.0 * Lam @ Sigma
+
+
+def loss_and_grad_moments_multi(S0: np.ndarray, Sts: Sequence[np.ndarray], N: int, FC_emp: np.ndarray, COV_emps: Sequence[np.ndarray],
+                                w_fc: float = 1.0, w_tau: float = 1.0):
+    """Loss over FC and several lagged correlations; gradients wrt S0 and each St."""
+    n = S0.shape[0]
+    Sxx = S0[:N, :N]
+    d = np.clip(np.diag(Sxx), 1e-300, None)
+    sd = np.sqrt(d)
+    denom = np.outer(sd, sd)
+    R = Sxx / denom
+    od = offdiag_mask(N)
+    dR = (R - FC_emp) * od
+    loss = 0.5 * w_fc * np.sum(dR ** 2)
+    G_R = w_fc * dR
+    gdiag = -0.5 / d * ((G_R * R).sum(axis=1) + (G_R * R).sum(axis=0))
+    G_Sxx = G_R / denom
+    G_Sts, Cts = [], []
+    w_l = w_tau / max(len(Sts), 1)
+    for St in Sts:
+        Txx = St[:N, :N]
+        Ct = Txx / denom
+        dCt = Ct - COV_emps[len(Cts)]
+        loss += 0.5 * w_l * np.sum(dCt ** 2)
+        G_Ct = w_l * dCt
+        gdiag = gdiag - 0.5 / d * ((G_Ct * Ct).sum(axis=1) + (G_Ct * Ct).sum(axis=0))
+        G_St = np.zeros((n, n))
+        G_St[:N, :N] = G_Ct / denom
+        G_Sts.append(G_St)
+        Cts.append(Ct)
+    G_Sxx = G_Sxx.copy()
+    G_Sxx[np.arange(N), np.arange(N)] = gdiag
+    G_S0 = np.zeros((n, n))
+    G_S0[:N, :N] = G_Sxx
+    return loss, G_S0, G_Sts, R, Cts
+
+
 def grads_to_params(G_A: np.ndarray, N: int, G: float):
     """Map dL/dA to dL/dC (N x N, i != j), dL/da (N,), dL/domega (N,)."""
     G11 = G_A[:N, :N] + G_A[N:, N:]
@@ -159,6 +244,11 @@ def fit_linear_gradient(FC_emp: np.ndarray, COVtau_emp: np.ndarray, C0: np.ndarr
     """L-BFGS-B fit of C (>= 0 on mask) [+ a, omega] of the linear Hopf model (G is absorbed in C)."""
     t0 = time.time()
     N = C0.shape[0]
+    # several lags: tau_tr a list and COVtau_emp a matching list of matrices
+    taus = [int(t) for t in (tau_tr if isinstance(tau_tr, (list, tuple, np.ndarray)) else [tau_tr])]
+    COV_list = list(COVtau_emp) if (isinstance(COVtau_emp, (list, tuple)) or (isinstance(COVtau_emp, np.ndarray) and COVtau_emp.ndim == 3)) else [COVtau_emp]
+    if len(COV_list) != len(taus):
+        raise ValueError(f"{len(COV_list)} lagged matrices for {len(taus)} lags")
     mask = np.asarray(mask, bool).copy()
     np.fill_diagonal(mask, False)
     idx = np.where(mask)
@@ -191,9 +281,10 @@ def fit_linear_gradient(FC_emp: np.ndarray, COVtau_emp: np.ndarray, C0: np.ndarr
     def fun(theta):
         C, av, w = unpack(theta)
         A = build_jacobian(C, 1.0, av, w)
-        S0, St, cache = forward_moments(A, beta, tr, tau_tr, h2)
-        loss, G_S0, G_St, R, Ct = loss_and_grad_moments(S0, St, N, FC_emp, COVtau_emp, w_fc, w_tau)
-        G_A = backward_moments(G_S0, G_St, A, tr, tau_tr, h2, cache)
+        S0, Sts, cache = forward_moments_multi(A, beta, tr, taus, h2)
+        loss, G_S0, G_Sts, R, Cts = loss_and_grad_moments_multi(S0, Sts, N, FC_emp, COV_list, w_fc, w_tau)
+        Ct = Cts[0]
+        G_A = backward_moments_multi(G_S0, G_Sts, A, tr, h2, cache)
         gC, ga, gw = grads_to_params(G_A, N, 1.0)
         if lambda_sc > 0:
             dP = (C - prior) * mask
@@ -219,7 +310,7 @@ def fit_linear_gradient(FC_emp: np.ndarray, COVtau_emp: np.ndarray, C0: np.ndarr
 
     def cb(theta):
         R, Ct, loss = state["last"]
-        m = fit_error(FC_emp, R, COVtau_emp, Ct)
+        m = fit_error(FC_emp, R, COV_list[0], Ct)
         m["iter"] = len(history)
         m["loss"] = float(loss)
         history.append(m)
@@ -233,12 +324,16 @@ def fit_linear_gradient(FC_emp: np.ndarray, COVtau_emp: np.ndarray, C0: np.ndarr
                    options={"maxiter": int(max_iter), "ftol": tol, "gtol": 1e-10, "maxcor": 20})
     C, av, w = unpack(res.x)
     A = build_jacobian(C, 1.0, av, w)
-    S0, St, _ = forward_moments(A, beta, tr, tau_tr, h2, keep_cache=False)
-    _, _, _, R, Ct = loss_and_grad_moments(S0, St, N, FC_emp, COVtau_emp, w_fc, w_tau)
+    S0, Sts, _ = forward_moments_multi(A, beta, tr, taus, h2)
+    _, _, _, R, Cts = loss_and_grad_moments_multi(S0, Sts, N, FC_emp, COV_list, w_fc, w_tau)
+    Ct = Cts[0]
     out = GradientFitResult(C=C, a=av, omega=w, loss=float(res.fun), n_iter=int(res.nit), n_fev=int(state["fev"]),
                             success=bool(res.success), message=str(res.message), history=history, FC_sim=R, COVtau_sim=Ct,
                             elapsed_s=time.time() - t0)
-    out.metrics = fit_error(FC_emp, R, COVtau_emp, Ct)
+    out.metrics = fit_error(FC_emp, R, COV_list[0], Ct)
+    if len(taus) > 1:
+        out.metrics["tau_rmse_all_lags"] = float(np.mean([rmse(COV_list[k], Cts[k]) for k in range(len(taus))]))
+        out.COVtau_sim_all = Cts
     if history:
         out.metrics["initial_fit_rmse"] = history[0]["fit_rmse"]
         out.metrics["initial_fc_corr"] = history[0]["fc_corr"]

@@ -56,6 +56,10 @@ def test_cli_fit(tmp_path):
         assert (out / "models" / f"model-{tag}" / "comparisons" / f"group-A_vs_group-B_atlas-toydseg_model-{tag}_desc-tstat_connectivity.tsv").exists()
     fit = pd.read_csv(out / "models" / "model-hopflinear" / "participants_atlas-toydseg_model-hopflinear_fit.tsv", sep="\t")
     assert len(fit) == 4 and fit["fc_corr"].min() > 0.5
+    # hierarchical fitting + cross-validation outputs
+    assert (out / "models" / "model-hopflinear" / "cv_lambda_atlas-toydseg_model-hopflinear.tsv").exists()
+    assert {"lambda_prior", "cv_fit_rmse", "cv_fc_corr", "cv_train_fit_rmse"} <= set(fit.columns) and fit["cv_fit_rmse"].notna().all()
+    assert json.loads((out / "fit_summary_atlas-toydseg.json").read_text())["hierarchical"]["linear"]["lambda_group"] >= 0
     # group-only re-run works from the saved participant fits
     r2 = subprocess.run([sys.executable, "-m", "hopfec.cli", "fit", "-c", str(tmp_path / "cfg.yaml"), "-q", "--group-only", "--model", "linear"], capture_output=True, text=True, cwd=tmp_path)
     assert r2.returncode == 0, r2.stderr[-2000:]

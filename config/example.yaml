@@ -88,15 +88,16 @@ model:
     mask: sc_plus_homotopic
   linear:
     enabled: true
-    method: gradient                # gradient (exact gradient, L-BFGS-B) | gec (heuristic GEC iteration)
+    method: gradient                # gradient (FC + lagged corr.) | whittle (cross-spectral likelihood) | gec (heuristic)
     filter_consistent: true
     fit_omega: true                 # co-estimate node frequencies (recommended)
     fit_a: none                     # none | global | node
     lambda_sc: 0.0                  # L2 pull towards the structural prior
   nonlinear:
     enabled: true
-    init: linear                    # initialise the non-linear GEC from the linear EC (or: sc)
-    n_sim: 2
+    init: linear                    # initialise from the linear EC (or: sc)
+    method: surrogate               # surrogate (recommended) | gec (heuristic, accept-if-improving)
+    n_sim: 4                        # raise if the fit reports improvement_below_noise
     eps_fc: 0.0005
     eps_tau: 0.0005
     max_iter: 300
@@ -105,6 +106,8 @@ model:
 group:
   fit_group_average: true
   mean_of_participants: true
+  hierarchical: true                # group EC first, then participants initialised from / shrunk towards it (lambda_group)
+  cross_validate: true              # split-half held-out fit metrics per participant
   compare: true
   compare_on: ECnorm                # edge-wise group tests on the max-normalised EC (or: EC)
   fdr_q: 0.05
