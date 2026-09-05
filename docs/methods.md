@@ -41,11 +41,21 @@ absorbed in `C`: the initial value is `G* · SC` from the search; the output `EC
 (`fit_omega: true`, initialised from spectral peaks) because errors in ω create spurious lagged
 asymmetries.
 
-**Heuristic GEC iteration (`method: gec`, and always for the non-linear model)**
+**Heuristic GEC iteration (`method: gec`)**
 `C_ij ← C_ij + ε_FC (FC_emp − FC_sim)_ij + ε_τ (COVtau_emp − COVtau_sim)_ij`, `C ≥ 0`, rescaled to
-max 0.2, best iterate kept, stop after `patience` non-improving iterations (Deco, Kringelbach et al.
-2019–2021).  The non-linear fit is initialised from the linear EC (`model.nonlinear.init: linear`) and
-averages `n_sim` simulations per iteration.
+max 0.2, best iterate kept (Deco, Kringelbach et al. 2019–2021).  With `accept_only_improving`
+(default for the non-linear model) an update is kept only if it lowers the error and the step sizes
+are halved otherwise.
+
+**Non-linear model (`model.nonlinear.method`)**
+Simulations use *common random numbers* (the same noise realisation at every iteration), so that the
+error trace reflects the coupling and not the simulation noise; the noise floor (SD of the error over
+`n_noise_seeds` realisations at the initial coupling) is reported and a fit whose improvement stays
+within 2 SD of it is flagged (`improvement_below_noise`; raise `n_sim`).  `surrogate` (default)
+back-propagates the non-linear residuals through the linear model's adjoint at the current coupling
+and takes accept-if-improving steps with an adaptive step size — a genuine descent direction for the
+non-linear loss; `gec` is the heuristic above.  The non-linear fit is initialised from the linear EC
+and node frequencies (`init: linear`).
 
 ### Validation on synthetic ground truth (N = 20, 8 "participants" × 600 volumes, TR 2 s)
 

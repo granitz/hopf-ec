@@ -171,7 +171,11 @@ DEFAULTS: dict[str, Any] = {
         "nonlinear": {
             "enabled": True,
             "init": "linear",           # linear (start from the linear EC) | sc
-            "n_sim": 2,
+            "method": "surrogate",      # surrogate (linear-adjoint gradient of the non-linear residual, accept-if-improving) | gec (heuristic)
+            "accept_only_improving": True,  # gec: keep an update only if it lowers the error (common random numbers)
+            "step_frac": 0.05,          # surrogate: initial largest coupling change as a fraction of max(C)
+            "n_noise_seeds": 3,         # simulations to estimate the noise floor of the fitting error
+            "n_sim": 4,
             "eps_fc": 0.0005,
             "eps_tau": 0.0005,
             "max_iter": 300,
@@ -408,8 +412,9 @@ model:
     lambda_sc: 0.0                  # L2 pull towards the structural prior
   nonlinear:
     enabled: true
-    init: linear                    # initialise the non-linear GEC from the linear EC (or: sc)
-    n_sim: 2
+    init: linear                    # initialise from the linear EC (or: sc)
+    method: surrogate               # surrogate (recommended) | gec (heuristic, accept-if-improving)
+    n_sim: 4                        # raise if the fit reports improvement_below_noise
     eps_fc: 0.0005
     eps_tau: 0.0005
     max_iter: 300

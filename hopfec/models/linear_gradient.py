@@ -82,8 +82,11 @@ def backward_moments(G_S0: np.ndarray, G_St: np.ndarray, A: np.ndarray, tr: floa
 
 
 def loss_and_grad_moments(S0: np.ndarray, St: np.ndarray, N: int, FC_emp: np.ndarray, COV_emp: np.ndarray,
-                          w_fc: float = 1.0, w_tau: float = 1.0):
-    """Loss on the x-blocks and its gradient wrt the full S0 / St matrices."""
+                          w_fc: float = 1.0, w_tau: float = 1.0, residuals: tuple | None = None):
+    """Loss on the x-blocks and its gradient wrt the full S0 / St matrices.
+
+    residuals=(dR, dCt) overrides the residuals of the linear moments (used to back-propagate the
+    residuals of the *non-linear* model through the linear model's Jacobian = surrogate gradient)."""
     n = S0.shape[0]
     Sxx = S0[:N, :N]
     Txx = St[:N, :N]
@@ -93,8 +96,12 @@ def loss_and_grad_moments(S0: np.ndarray, St: np.ndarray, N: int, FC_emp: np.nda
     R = Sxx / denom
     Ct = Txx / denom
     od = offdiag_mask(N)
-    dR = (R - FC_emp) * od
-    dCt = Ct - COV_emp
+    if residuals is None:
+        dR = (R - FC_emp) * od
+        dCt = Ct - COV_emp
+    else:
+        dR = np.asarray(residuals[0], float) * od
+        dCt = np.asarray(residuals[1], float)
     loss = 0.5 * w_fc * np.sum(dR ** 2) + 0.5 * w_tau * np.sum(dCt ** 2)
     G_R = w_fc * dR
     G_Ct = w_tau * dCt

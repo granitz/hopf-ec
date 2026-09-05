@@ -87,16 +87,30 @@ def fit_error(FC_emp, FC_sim, COV_emp, COV_sim) -> dict:
     }
 
 
+def _project(C: np.ndarray, mask: np.ndarray, normalize_max: float | None) -> np.ndarray:
+    C = np.array(C, float)
+    C[~mask] = 0.0
+    np.fill_diagonal(C, 0.0)
+    C[C < 0] = 0.0
+    if normalize_max:
+        mx = C.max()
+        if mx > 0:
+            C *= normalize_max / mx
+    return C
+
+
 def fit_gec(FC_emp: np.ndarray, COVtau_emp: np.ndarray, C0: np.ndarray, moments_fn: Callable[[np.ndarray], tuple],
             mask: np.ndarray, G: float = 1.0, eps_fc: float = 1e-3, eps_tau: float = 1e-3, max_iter: int = 1000,
             min_iter: int = 20, patience: int = 50, normalize_max: float | None = 0.2, verbose: int = 0,
-            callback: Callable[[int, dict], None] | None = None, log_every: int = 50) -> GECResult:
-    """Run the GEC iteration.  moments_fn(C) -> (FC_sim, COVtau_sim)."""
+            callback: Callable[[int, dict], None] | None = None, log_every: int = 50, accept_only_improving: bool = False,
+            eps_decay: float = 0.5, eps_min_frac: float = 1e-3) -> GECResult:
+    """Run the GEC iteration.  moments_fn(C) -> (FC_sim, COVtau_sim).
+
+    accept_only_improving: a proposed update is kept only if it lowers the fitting error (evaluated with the
+    same moments_fn, i.e. with common random numbers for simulated moments); otherwise the step sizes are
+    multiplied by eps_decay and the proposal repeated, until they fall below eps_min_frac of their start."""
     t0 = time.time()
-    C = np.array(C0, float)
-    C[~mask] = 0.0
-    if normalize_max and C.max() > 0:
-        C *= normalize_max / C.max()
+    C = _project(C0, mask, normalize_max)
     best_err = np.inf
     best_C = C.copy()
     best_it = 0
@@ -104,14 +118,17 @@ def fit_gec(FC_emp: np.ndarray, COVtau_emp: np.ndarray, C0: np.ndarray, moments_
     history: list[dict] = []
     stall = 0
     converged = False
+    e_fc, e_tau = float(eps_fc), float(eps_tau)
+    FC_sim, COV_sim = moments_fn(C)
+    n_rejected = 0
     for it in range(int(max_iter)):
-        FC_sim, COV_sim = moments_fn(C)
         if not (np.all(np.isfinite(FC_sim)) and np.all(np.isfinite(COV_sim))):
             LOG.warning("GEC: non-finite model moments at iteration %d; stopping", it)
             break
         m = fit_error(FC_emp, FC_sim, COVtau_emp, COV_sim)
         m["iter"] = it
         m["C_sum"] = float(C.sum())
+        m["eps_fc"] = e_fc
         history.append(m)
         if callback:
             callback(it, m)
@@ -128,16 +145,21 @@ def fit_gec(FC_emp: np.ndarray, COVtau_emp: np.ndarray, C0: np.ndarray, moments_
             if stall >= patience and it >= min_iter:
                 converged = True
                 break
-        # update
-        dC = eps_fc * (FC_emp - FC_sim) + eps_tau * (COVtau_emp - COV_sim)
-        C = C + dC
-        C[~mask] = 0.0
-        np.fill_diagonal(C, 0.0)
-        C[C < 0] = 0.0
-        if normalize_max:
-            mx = C.max()
-            if mx > 0:
-                C *= normalize_max / mx
+        # proposal
+        C_new = _project(C + e_fc * (FC_emp - FC_sim) + e_tau * (COVtau_emp - COV_sim), mask, normalize_max)
+        FC_new, COV_new = moments_fn(C_new)
+        if accept_only_improving:
+            err_new = fit_error(FC_emp, FC_new, COVtau_emp, COV_new)["fit_rmse"]
+            if not np.isfinite(err_new) or err_new >= m["fit_rmse"]:
+                n_rejected += 1
+                e_fc *= eps_decay
+                e_tau *= eps_decay
+                if e_fc < eps_fc * eps_min_frac:
+                    converged = True
+                    LOG.info("GEC: step size exhausted after %d iterations (%d rejected proposals)", it + 1, n_rejected)
+                    break
+                continue  # same C, smaller steps
+        C, FC_sim, COV_sim = C_new, FC_new, COV_new
     res = GECResult(C=best_C, G=G, history=history, best_iter=best_it, n_iter=len(history), converged=converged,
                     elapsed_s=time.time() - t0)
     if best_mom is not None:
@@ -145,4 +167,5 @@ def fit_gec(FC_emp: np.ndarray, COVtau_emp: np.ndarray, C0: np.ndarray, moments_
         res.metrics = fit_error(FC_emp, res.FC_sim, COVtau_emp, res.COVtau_sim)
         res.metrics["initial_fit_rmse"] = history[0]["fit_rmse"] if history else float("nan")
         res.metrics["initial_fc_corr"] = history[0]["fc_corr"] if history else float("nan")
+    res.metrics["n_rejected"] = n_rejected
     return res

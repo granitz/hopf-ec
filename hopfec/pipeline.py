@@ -24,6 +24,7 @@ from .models.gec import fit_gec, initial_ec, make_mask
 from .models.hopf_linear import analytic_moments
 from .models.hopf_nonlinear import simulated_moments
 from .models.linear_gradient import fit_linear_gradient
+from .models.nonlinear_fit import fit_nonlinear_surrogate, noise_floor
 from .models.search import adaptive_search, error_surface
 from .models.signal import average_spectra, empirical_moments, fcd_distribution, metastability, peak_frequencies
 from .plotting import plot_ec_summary, plot_error_surface, plot_fit, plot_group_comparison
@@ -292,15 +293,35 @@ def fit_one(model: str, emp: dict, SC: np.ndarray, G: float, a, cfg: dict, atlas
             C0 = initial_ec(SC, N, mask, gcfg.get("init", "sc"), sc_max)
             G_use = float(G)
         n_vol = int(emp.get("n_volumes", 500))
-        res = fit_gec(emp["FC"], emp["COVtau"], C0,
-                      lambda C: simulated_moments(C, G_use, a, omega, tr, n_vol, band, tau, beta=beta, dt=float(m.get("dt", 0.1)),
-                                                  n_sim=int(nc.get("n_sim", 2)), seed=int(nc.get("seed", 0)), transient_s=float(m.get("transient_s", 100.0)),
-                                                  use_numba=nc.get("use_numba", "auto")),
-                      mask, G=G_use, eps_fc=float(nc.get("eps_fc", 5e-4)), eps_tau=float(nc.get("eps_tau", 5e-4)), max_iter=int(nc.get("max_iter", 300)),
-                      min_iter=int(gcfg.get("min_iter", 20)), patience=int(nc.get("patience", 20)),
-                      normalize_max=sc_max if gcfg.get("normalize_max", True) else None, verbose=verbose)
+        base_seed = int(nc.get("seed", 0))
+
+        def sim(C, seed=base_seed):  # common random numbers: same seed at every iteration
+            return simulated_moments(C, G_use, a, omega, tr, n_vol, band, tau, beta=beta, dt=float(m.get("dt", 0.1)),
+                                     n_sim=int(nc.get("n_sim", 2)), seed=seed, transient_s=float(m.get("transient_s", 100.0)),
+                                     use_numba=nc.get("use_numba", "auto"))
+
+        nf = noise_floor(lambda C, sd: sim(C, sd), C0, emp["FC"], emp["COVtau"], n_seeds=int(nc.get("n_noise_seeds", 3))) if int(nc.get("n_noise_seeds", 3)) > 0 else {}
+        nl_method = str(nc.get("method", "surrogate"))
+        if nl_method == "surrogate":
+            res = fit_nonlinear_surrogate(emp["FC"], emp["COVtau"], C0, sim, mask, G_use, a, omega, tr, tau, beta, band,
+                                          filter_consistent=bool(cfg_get(cfg, "model.linear.filter_consistent", True)),
+                                          max_iter=int(nc.get("max_iter", 300)), patience=int(nc.get("patience", 20)),
+                                          step_frac=float(nc.get("step_frac", 0.05)), normalize_max=sc_max if gcfg.get("normalize_max", True) else None,
+                                          verbose=verbose)
+        else:
+            res = fit_gec(emp["FC"], emp["COVtau"], C0, sim, mask, G=G_use, eps_fc=float(nc.get("eps_fc", 5e-4)), eps_tau=float(nc.get("eps_tau", 5e-4)),
+                          max_iter=int(nc.get("max_iter", 300)), min_iter=int(gcfg.get("min_iter", 20)), patience=int(nc.get("patience", 20)),
+                          normalize_max=sc_max if gcfg.get("normalize_max", True) else None, verbose=verbose,
+                          accept_only_improving=bool(nc.get("accept_only_improving", True)))
+        res.metrics.update(nf)
+        if nf and (res.metrics.get("initial_fit_rmse", np.nan) - res.metrics["fit_rmse"]) < 2 * nf.get("noise_floor_sd", 0.0):
+            res.metrics["improvement_below_noise"] = True
+            LOG.warning("non-linear fit: improvement over the initialisation (%.4f -> %.4f) is within 2 SD of the simulation-noise floor (%.4f); increase nonlinear.n_sim",
+                        res.metrics.get("initial_fit_rmse", np.nan), res.metrics["fit_rmse"], nf["noise_floor_sd"])
+        else:
+            res.metrics["improvement_below_noise"] = False
         EC = G_use * res.C
-        out.update({"method": "gec", "G_used": G_use, "metrics": res.metrics, "history": res.history, "FC_sim": res.FC_sim, "COVtau_sim": res.COVtau_sim,
+        out.update({"method": nl_method, "G_used": G_use, "metrics": res.metrics, "history": res.history, "FC_sim": res.FC_sim, "COVtau_sim": res.COVtau_sim,
                     "n_iter": res.n_iter, "best_iter": res.best_iter, "converged": res.converged, "a_fit": None, "omega_fit": omega.tolist()})
     else:
         raise ValueError(model)
