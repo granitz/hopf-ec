@@ -254,14 +254,25 @@ def _omega(emp: dict) -> np.ndarray:
     return 2 * np.pi * np.asarray(emp["f_peak"], float)
 
 
-def run_search(model: str, SC: np.ndarray, emp: dict, cfg: dict, out_base: Path, n_jobs: int, title: str = "") -> dict:
-    """Adaptive (G x a) search: grid, border extension, refinement, interpolation, optional continuous optimisation."""
+def run_search(model: str, SC: np.ndarray, emp: dict, cfg: dict, out_base: Path, n_jobs: int, title: str = "", hetero: dict | None = None) -> dict:
+    """Adaptive (G x a) search: grid, border extension, refinement, interpolation, optional continuous optimisation.
+
+    hetero = {"z": z-scored map, "a0": float, "clip": (lo, hi), "beta_values": grid} turns the a-axis into the map weight beta."""
     m = _model_cfg(cfg)
     s = m.get("search", {})
     G_values = linspace_spec(s.get("G", {"start": 0.0, "stop": 3.0, "step": 0.1}))
     a_values = linspace_spec(s.get("a")) if s.get("a") is not None else None
     metric = s.get("metric", "fit_rmse")
+    a_fn = a_grad = None
+    a_axis = "a"
+    if hetero:
+        z, a0h, clip = np.asarray(hetero["z"], float), float(hetero["a0"]), hetero.get("clip")
+        a_fn = (lambda b, z=z, a0h=a0h, clip=clip: (np.clip(a0h + b * z, clip[0], clip[1]) if clip else a0h + b * z))
+        a_grad = (lambda b, z=z: z)
+        a_values = np.asarray(hetero["beta_values"], float)
+        a_axis = "beta"
     df, best, info = adaptive_search(model, SC, _omega(emp), emp, emp["tr"], G_values, a_values, m.get("filter_band"), search_cfg=s,
+                                     a_fn=a_fn, a_grad=a_grad, a_axis=a_axis,
                                      tau_tr=_first_tau(m), beta=float(m.get("beta", 0.02)), dt=float(m.get("dt", 0.1)),
                                      n_sim=int(s.get("n_sim", 1)), seed=int(cfg_get(cfg, "model.nonlinear.seed", 0)),
                                      transient_s=float(m.get("transient_s", 100.0)), filter_consistent=bool(cfg_get(cfg, "model.linear.filter_consistent", True)),
@@ -280,8 +291,12 @@ def run_search(model: str, SC: np.ndarray, emp: dict, cfg: dict, out_base: Path,
     plot_error_surface(Gs, As, surf, metric, Path(str(out_base) + "_desc-errorsurface.png"), best, title=title,
                        extra_points=refined, used=(best["G"], best["a"]), grid_best=(best.get("G_grid", best["G"]), best.get("a_grid", best["a"])))
     save_json(Path(str(out_base) + "_desc-search.json"), {"best": best, "metric": metric, "G_values": Gs, "a_values": As, "n_points": len(df), **info})
-    LOG.info("%s search (%s): G=%.4g a=%.4g via %s; %s=%.4g at the grid optimum%s", model, title, best["G"], best["a"], best.get("source", "grid"),
+    LOG.info("%s search (%s): G=%.4g %s=%.4g via %s; %s=%.4g at the grid optimum%s", model, title, best["G"], a_axis, best["a"], best.get("source", "grid"),
              metric, best[metric], "; WARNINGS: " + " | ".join(info["warnings"]) if info.get("warnings") else "")
+    best["a_axis"] = a_axis
+    if hetero:
+        best["beta"] = float(best["a"])
+        best["a_vector"] = a_fn(float(best["a"]))
     return best
 
 
@@ -574,6 +589,17 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
     save_matrix(out_dir / "sc" / f"group-all_atlas-{aslug}_desc-modelSC_connectivity.tsv", SC_group, names)
     a_cfg = m.get("a", -0.02)
     a = np.asarray(a_cfg, float) if isinstance(a_cfg, (list, tuple)) else float(a_cfg)
+    hcfg = m.get("heterogeneity", {}) or {}
+    hetero = None
+    if hcfg.get("enabled") and hcfg.get("map"):
+        from .maps import load_parcel_map
+
+        pmap = load_parcel_map({**hcfg["map"], "zscore": hcfg.get("zscore", True)}, atlas)
+        a0h = float(hcfg.get("a0") if hcfg.get("a0") is not None else _scalar_a(m))
+        hetero = {"z": pmap.z, "a0": a0h, "clip": tuple(hcfg.get("clip") or (-0.9, 0.9)), "beta_values": linspace_spec(hcfg.get("beta", {"start": -0.05, "stop": 0.05, "num": 11})), "map": pmap}
+        save_matrix(out_dir / "sc" / f"atlas-{aslug}_desc-map{slug(pmap.name)}_values.tsv", np.c_[pmap.values, pmap.z], ["value", "z"])
+        summary["heterogeneity"] = {"map": pmap.name, "source": pmap.source, "n_missing": pmap.n_missing, "a0": a0h}
+        LOG.info("heterogeneous bifurcation parameter from map %s (%s): a_j = %.3g + beta * z_j", pmap.name, pmap.source, a0h)
     linear_results: dict[str, dict] = {}          # sub -> {"EC", "omega"} from the linear model
     linear_group_results: dict[str, dict] = {}
     compare_on = str(cfg_get(cfg, "group.compare_on", "ECnorm"))
@@ -586,8 +612,15 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
         level = cfg_get(cfg, "model.search.level", "group")
         if G_fixed is None and cfg_get(cfg, "model.search.enabled", True) and not group_only:
             if level in ("group", "both"):
-                best_group = run_search(model, SC_group, emp_all, cfg, mdir / "search" / f"group-all_atlas-{aslug}_model-{tag}", n_jobs, title=f"{model} model, all participants")
-                if best_group.get("a") is not None and cfg_get(cfg, "model.search.a") is not None:
+                best_group = run_search(model, SC_group, emp_all, cfg, mdir / "search" / f"group-all_atlas-{aslug}_model-{tag}", n_jobs, title=f"{model} model, all participants", hetero=hetero)
+                if hetero and best_group.get("a_vector") is not None:
+                    a = np.asarray(best_group["a_vector"], float)
+                    pmap = hetero["map"]
+                    save_matrix(mdir / f"group-all_atlas-{aslug}_model-{tag}_desc-heterogeneity_a.tsv", np.c_[pmap.z, a], ["z", "a_j"])
+                    save_json(mdir / f"group-all_atlas-{aslug}_model-{tag}_desc-heterogeneity.json", {"map": pmap.name, "source": pmap.source, "a0": hetero["a0"], "beta": best_group["beta"], "G": best_group["G"],
+                              "a_min": float(a.min()), "a_max": float(a.max()), "n_supercritical": int(np.sum(a > 0)), "metric": best_group.get("metric"), "value": best_group.get(best_group.get("metric", "fit_rmse"))})
+                    summary["heterogeneity"].update({model: {"beta": best_group["beta"], "G": best_group["G"], "a_range": [float(a.min()), float(a.max())]}})
+                elif best_group.get("a") is not None and cfg_get(cfg, "model.search.a") is not None:
                     a = float(best_group["a"])
         G_group = float(G_fixed) if G_fixed is not None else (float(best_group["G"]) if best_group else 1.0)
         summary.setdefault("search", {})[model] = {"G_group": G_group, "a": a if np.isscalar(a) else list(a), "best": best_group}
@@ -631,7 +664,7 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
             for s in ok:
                 G_s = G_group
                 if G_fixed is None and level in ("participant", "both") and cfg_get(cfg, "model.search.enabled", True):
-                    b = run_search(model, s.SC, s.emp, cfg, mdir / s.sub / f"{s.sub}_atlas-{aslug}_model-{tag}", n_jobs, title=f"{model} model, {s.sub}")
+                    b = run_search(model, s.SC, s.emp, cfg, mdir / s.sub / f"{s.sub}_atlas-{aslug}_model-{tag}", n_jobs, title=f"{model} model, {s.sub}", hetero=hetero)
                     G_s = float(b["G"])
                 use_lin = model == "nonlinear" and cfg_get(cfg, "model.nonlinear.init", "linear") == "linear" and s.sub in linear_results
                 C_init = linear_results[s.sub]["EC"] if use_lin else None

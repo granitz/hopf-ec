@@ -190,6 +190,14 @@ DEFAULTS: dict[str, Any] = {
             "use_numba": "auto",
         },
         "fcd": {"window_tr": 30, "step_tr": 3},
+        "heterogeneity": {
+            "enabled": False,           # heterogeneous bifurcation parameter a_j = a0 + beta * z_j (z: z-scored brain map)
+            "map": None,                # {name, file: <tsv|nii.gz>} or {name, neuromaps: {source, desc, space, den|res}, surface_labels}
+            "a0": None,                 # homogeneous part (default: model.a)
+            "beta": {"start": -0.05, "stop": 0.05, "num": 11},   # search grid for the map weight (replaces the a-axis)
+            "clip": [-0.9, 0.9],        # bounds for a_j
+            "zscore": True,
+        },
     },
     "group": {"fit_group_average": True, "mean_of_participants": True, "pooled": True, "min_subjects": 2, "compare": True,
               "compare_on": "ECnorm",    # ECnorm (max-normalised, scale-free) | EC (absolute coupling)
@@ -422,6 +430,10 @@ model:
     fit_omega: true                 # co-estimate node frequencies (recommended)
     fit_a: none                     # none | global | node
     lambda_sc: 0.0                  # L2 pull towards the structural prior
+  heterogeneity:
+    enabled: false                  # a_j = a0 + beta * z_j from a brain map (e.g. T1w/T2w myelin); beta searched with G
+    map: null                       # {name: myelin, file: ./maps/myelin_parcels.tsv}  or  {name: myelin, neuromaps: {source: hcps1200, desc: myelinmap, space: fsLR, den: 32k}, surface_labels: atlas.dlabel.nii}
+    beta: {start: -0.05, stop: 0.05, num: 11}
   nonlinear:
     enabled: true
     init: linear                    # initialise from the linear EC (or: sc)

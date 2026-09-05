@@ -49,9 +49,11 @@ SEARCH_DEFAULTS = {
 # --------------------------------------------------------------------------- single point
 def _eval_point(model: str, G: float, a, SC, omega, emp: dict, tr: float, band, tau_tr: int, beta: float, dt: float,
                 n_sim: int, seed: int, transient_s: float, filter_consistent: bool, need_fcd: bool, fcd_cfg: dict,
-                use_numba) -> dict:
+                use_numba, a_fn=None) -> dict:
     FC_emp, COV_emp = emp["FC"], emp["COVtau"]
     out = {"G": float(G), "a": float(a) if np.isscalar(a) else float(np.mean(a)), "valid": True, "reason": ""}
+    if a_fn is not None and np.isscalar(a):
+        a = a_fn(float(a))  # heterogeneity: axis value (e.g. beta) -> node vector a_j
     if model == "linear":
         st = linear_stability(SC, G, a, omega)
         if not st["stable"]:
@@ -86,12 +88,12 @@ def _finalize(df: pd.DataFrame, metric: str) -> pd.DataFrame:
 
 def evaluate_points(model: str, points: Sequence[tuple[float, float]], SC, omega, emp, tr, band, tau_tr=1, beta=0.02,
                     dt=0.1, n_sim=1, seed=0, transient_s=100.0, filter_consistent=True, metric="fit_rmse", fcd_cfg=None,
-                    n_jobs=1, use_numba="auto", stage: str = "coarse") -> pd.DataFrame:
+                    n_jobs=1, use_numba="auto", stage: str = "coarse", a_fn=None) -> pd.DataFrame:
     fcd_cfg = fcd_cfg or {}
     need_fcd = metric in ("fcd_ks", "meta_diff", "combined")
     rows = Parallel(n_jobs=n_jobs, prefer="processes")(
         delayed(_eval_point)(model, G, a, SC, omega, emp, tr, band, tau_tr, beta, dt, n_sim, seed, transient_s,
-                             filter_consistent, need_fcd, fcd_cfg, use_numba)
+                             filter_consistent, need_fcd, fcd_cfg, use_numba, a_fn)
         for G, a in points
     )
     df = pd.DataFrame(rows)
@@ -247,7 +249,7 @@ def interpolate_optimum(df: pd.DataFrame, best: dict, metric: str) -> dict:
 def continuous_search(model: str, SC, omega, emp, tr, G0: float, a0: float, band, fit_a: bool, metric: str,
                       bounds_G: tuple[float, float], bounds_a: tuple[float, float], tau_tr=1, beta=0.02, dt=0.1, n_sim=1,
                       seed=0, transient_s=100.0, filter_consistent=True, fcd_cfg=None, method: str = "auto",
-                      max_fev: int = 60, use_numba="auto") -> dict:
+                      max_fev: int = 60, use_numba="auto", a_fn=None, a_grad=None) -> dict:
     """Continuous optimisation of G (and a) starting from the grid optimum.
 
     Linear model + fit_rmse: exact loss/gradient (adjoint) with L-BFGS-B.  Otherwise Powell on the metric
@@ -256,8 +258,10 @@ def continuous_search(model: str, SC, omega, emp, tr, G0: float, a0: float, band
     lo_G = max(float(bounds_G[0]), 1e-3)
     hi_G = float(bounds_G[1])
     lo_a, hi_a = float(bounds_a[0]), float(bounds_a[1])
-    if model == "linear":
+    if model == "linear" and a_fn is None:
         hi_a = min(hi_a, -1e-3)
+    to_vec = (lambda v: a_fn(float(v))) if a_fn is not None else (lambda v: float(v))
+    grad_vec = a_grad if a_grad is not None else (lambda v: np.ones(N))   # d a_j / d(axis value)
     G0 = float(np.clip(G0, lo_G, hi_G))
     a0 = float(np.clip(a0, lo_a, hi_a))
     use_grad = (method == "auto" and model == "linear" and metric == "fit_rmse") or method == "lbfgs"
@@ -274,13 +278,17 @@ def continuous_search(model: str, SC, omega, emp, tr, G0: float, a0: float, band
 
         def fun(x):
             G = float(x[0])
-            a = float(x[1]) if fit_a else a0
-            A = build_jacobian(G * SC, 1.0, a, omega)
+            av = float(x[1]) if fit_a else a0
+            a_vec = to_vec(av)
+            A = build_jacobian(G * SC, 1.0, a_vec, omega)
+            if np.max(np.real(np.linalg.eigvals(A))) >= 0:   # outside the linear model's validity: large penalty
+                nfev["n"] += 1
+                return 1e6, np.zeros(len(x))
             S0, St, cache = forward_moments(A, beta, tr, tau_tr, h2)
             loss, G_S0, G_St, _, _ = loss_and_grad_moments(S0, St, N, emp["FC"], emp["COVtau"], w_fc, w_tau)
             G_A = backward_moments(G_S0, G_St, A, tr, tau_tr, h2, cache)
             gC, ga, _ = grads_to_params(G_A, N, 1.0)
-            g = [float(np.sum(gC * SC))] + ([float(ga.sum())] if fit_a else [])
+            g = [float(np.sum(gC * SC))] + ([float(np.sum(ga * grad_vec(av)))] if fit_a else [])
             nfev["n"] += 1
             return loss, np.array(g)
 
@@ -295,7 +303,7 @@ def continuous_search(model: str, SC, omega, emp, tr, G0: float, a0: float, band
             G = float(x[0])
             a = float(x[1]) if fit_a else a0
             r = _eval_point(model, G, a, SC, omega, emp, tr, band, tau_tr, beta, dt, n_sim, seed, transient_s, filter_consistent,
-                            metric in ("fcd_ks", "meta_diff", "combined"), fcd_cfg or {}, use_numba)
+                            metric in ("fcd_ks", "meta_diff", "combined"), fcd_cfg or {}, use_numba, a_fn)
             if metric == "combined":
                 r["combined"] = (1 - r["fc_corr"]) + r.get("fcd_ks", 0.0)
             v = r.get(metric, np.nan)
@@ -320,18 +328,20 @@ def continuous_search(model: str, SC, omega, emp, tr, G0: float, a0: float, band
 # --------------------------------------------------------------------------- orchestration
 def adaptive_search(model: str, SC, omega, emp, tr, G_values, a_values, band, search_cfg: dict | None = None, tau_tr=1,
                     beta=0.02, dt=0.1, n_sim=1, seed=0, transient_s=100.0, filter_consistent=True, metric="fit_rmse",
-                    fcd_cfg=None, n_jobs=1, use_numba="auto", default_a=-0.02) -> tuple[pd.DataFrame, dict, dict]:
+                    fcd_cfg=None, n_jobs=1, use_numba="auto", default_a=-0.02, a_fn=None, a_grad=None,
+                    a_axis: str = "a") -> tuple[pd.DataFrame, dict, dict]:
     """Grid search + border handling + extension + refinement + interpolation [+ continuous optimisation].
 
     Returns (table of all evaluated points, best point actually to be used, info dict for reporting)."""
     s = {**SEARCH_DEFAULTS, **(search_cfg or {})}
     kw = dict(tau_tr=tau_tr, beta=beta, dt=dt, n_sim=n_sim, seed=seed, transient_s=transient_s, filter_consistent=filter_consistent,
-              metric=metric, fcd_cfg=fcd_cfg, n_jobs=n_jobs, use_numba=use_numba)
+              metric=metric, fcd_cfg=fcd_cfg, n_jobs=n_jobs, use_numba=use_numba, a_fn=a_fn)
     G_vals = np.round(np.array([float(g) for g in G_values]), 10)
     a_grid = a_values is not None and len(a_values) > 0
     a_vals = np.round(np.asarray(a_values, float), 10) if a_grid else np.array([float(default_a)])
-    if model == "linear" and a_grid and np.any(a_vals >= 0):
+    if model == "linear" and a_grid and a_fn is None and np.any(a_vals >= 0):
         LOG.warning("linear model: grid points with a >= 0 may be unstable and will be marked invalid")
+    info_axis = {"a_axis": a_axis}
     if 0.0 in G_vals and not s["allow_zero_G"]:
         LOG.info("G = 0 is on the grid: evaluated for the error surface but never selected (uncoupled model)")
     info: dict = {"metric": metric, "stages": [], "warnings": [], "extensions": []}
@@ -420,13 +430,15 @@ def adaptive_search(model: str, SC, omega, emp, tr, G_values, a_values, band, se
         cont = continuous_search(model, SC, omega, emp, tr, used["G"], used["a"], band, fit_a=a_grid, metric=metric,
                                  bounds_G=caps["G"], bounds_a=caps["a"], tau_tr=tau_tr, beta=beta, dt=dt, n_sim=n_sim, seed=seed,
                                  transient_s=transient_s, filter_consistent=filter_consistent, fcd_cfg=fcd_cfg,
-                                 method=s["continuous_method"], max_fev=int(s["continuous_max_fev"]), use_numba=use_numba)
+                                 method=s["continuous_method"], max_fev=int(s["continuous_max_fev"]), use_numba=use_numba,
+                                 a_fn=a_fn, a_grad=a_grad)
         better = (cont[metric] <= float(best[metric])) if LOWER_IS_BETTER.get(metric, True) else (cont[metric] >= float(best[metric]))
         if np.isfinite(cont[metric]) and (better or cont["success"]):
             used = {"G": cont["G"], "a": cont["a"], "source": f"continuous ({cont['method']})"}
         info["continuous"] = cont
     final = dict(best)
     final.update({"G": used["G"], "a": used["a"], "source": used["source"], "G_grid": best_refined["G"], "a_grid": best_refined["a"]})
+    info.update(info_axis)
     info.update({"best_coarse": {k: best_coarse[k] for k in ("G", "a", metric)}, "best_refined": {k: best_refined[k] for k in ("G", "a", metric)},
                  "interpolated": interp, "used": used, "n_evaluated": int(len(df)), "n_invalid": int((~df["valid"].astype(bool)).sum()),
                  "zero_G_excluded": not s["allow_zero_G"]})

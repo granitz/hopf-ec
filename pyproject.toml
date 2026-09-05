@@ -25,7 +25,8 @@ dependencies = [
 [project.optional-dependencies]
 fast = ["numba>=0.57"]
 tractography = ["dipy>=1.7", "templateflow>=23.0"]
-all = ["numba>=0.57", "dipy>=1.7", "templateflow>=23.0", "pytest>=7"]
+maps = ["neuromaps>=0.0.5"]
+all = ["numba>=0.57", "dipy>=1.7", "templateflow>=23.0", "pytest>=7", "neuromaps>=0.0.5"]
 
 [project.scripts]
 hopfec = "hopfec.cli:main"

@@ -83,7 +83,10 @@ GEC update rule `C_ij += ε_FC (FC_emp − FC_sim) + ε_τ (COVtau_emp − COVta
 linear solution.  The global coupling `G` (and optionally `a`) come from a parallel grid search whose
 error surface is saved; optima on a grid edge extend the grid automatically, a coarse-to-fine pass with
 parabolic interpolation refines them, invalid (unstable) points are flagged, and a continuous (G, a)
-optimisation is available.  Group EC is fitted to group-average statistics and also reported as the
+optimisation is available.  A brain map (e.g. T1w/T2w myelin from `neuromaps`) can make the bifurcation
+parameter heterogeneous (`a_j = a0 + beta z_j`, beta searched with G); group-first hierarchical fitting with
+cross-validated shrinkage and held-out validation, several lags or a Whittle cross-spectral likelihood are
+available for the linear model.  Group EC is fitted to group-average statistics and also reported as the
 mean of participant ECs; groups are compared edge-wise (FDR) on the max-normalised EC by default
 (`group.compare_on`).  Details, references and the validation on synthetic ground truth:
 `docs/methods.md`.

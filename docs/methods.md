@@ -101,6 +101,19 @@ the participant EC with the truth from 0.42 to 0.53–0.58.
   strong measurement noise it recovered the truth better than the moment fit (0.57 vs 0.41), without
   noise slightly worse (0.61 vs 0.70); per-node noise amplitudes overfit and are not the default.
 
+## Heterogeneous bifurcation parameter from brain maps
+
+`model.heterogeneity.enabled: true` with a parcel-wise map (TSV/CSV per parcel, an MNI-space NIfTI that is
+parcellated with the atlas, or a `neuromaps` annotation: volumetric ones are parcellated directly,
+surface ones need the atlas as CIFTI dlabel / GIFTI labels via `surface_labels`) makes the local
+bifurcation parameter heterogeneous, `a_j = a0 + beta * z_j` with z the z-scored map (missing parcels stay
+at a0).  The search axis for `a` becomes the map weight `beta` (grid `heterogeneity.beta`, border
+extension, refinement, and the continuous optimiser with the chain-rule gradient sum_j (dL/da_j) z_j);
+the resulting a_j profile is used in all subsequent fits (participants, groups, non-linear model) and saved
+as `*_desc-heterogeneity_a.tsv` / `.json` (beta, G, range of a_j, number of supercritical nodes).  On a
+synthetic system with a_j = -0.05 + 0.03 z_j the search recovered G and beta exactly.  One map per run in
+this version; several maps can be compared across runs (`fit_summary_*.json` records the map).
+
 ## Parameter search / error surface
 
 `model.search.G` (and optionally `model.search.a`) define the coarse grid; the homogeneous model

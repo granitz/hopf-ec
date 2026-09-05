@@ -71,3 +71,9 @@ over `model.linear.lambda_grid`; `group.cv_max_participants`, `group.cv_max_iter
 `group.cross_validate` (held-out metrics per participant).  `input.prefiltered_band: auto` reads the band
 already applied by `hopfec timeseries` from the sidecar so the data are not filtered twice.
 Linear estimators: `model.linear.method: gradient | whittle | gec`; `model.tau_tr` may be a list of lags.
+
+## Heterogeneity
+
+`model.heterogeneity`: `enabled`, `map` (`{name, file}` for a per-parcel TSV/CSV or an MNI NIfTI; or
+`{name, neuromaps: {source, desc, space, den|res}, surface_labels}` — needs `pip install neuromaps`),
+`a0` (default `model.a`), `beta` (search grid), `clip`, `zscore`.
