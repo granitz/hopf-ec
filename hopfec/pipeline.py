@@ -159,7 +159,14 @@ def load_subject_empirical(files: list[TimeseriesFile], cfg: dict, n_expected: i
     freqs, P = average_spectra(specs)
     f_peak, _ = peak_frequencies(None, trs[0], freq_band, smooth, spectrum=(freqs, P))
     halves = split_halves(filtered_runs, tau, min_volumes=max(40, min_vol // 2))
+    ndte_emp = None
+    ncfg = cfg_get(cfg, "model.ndte", {}) or {}
+    if ncfg.get("enabled"):
+        from .models.ndte import ndte
+
+        ndte_emp = ndte(np.concatenate(filtered_runs, axis=0), int(ncfg.get("max_lag", 10)))
     return {"FC": np.mean(fcs, 0), "COVtau": np.mean(covs, 0), "f_peak": f_peak, "spectrum": (freqs, P),
+            "NDTE": ndte_emp, "ndte_max_lag": int(ncfg.get("max_lag", 10)),
             "fcd": np.concatenate(fcds), "metastability": float(np.mean(metas)), "n_volumes": int(np.mean(nvols)),
             "tr": trs[0], "n_runs": len(fcs), "files": used, "bad_nodes": sorted(bad_nodes), "halves": halves,
             "filtered_runs": filtered_runs, "taus": taus,
@@ -199,7 +206,9 @@ def group_empirical(subjects: list[Subject], freq_band, smooth: float) -> dict:
     out = {"FC": np.mean([e["FC"] for e in emps], 0), "COVtau": np.mean([e["COVtau"] for e in emps], 0), "f_peak": f_peak,
            "spectrum": (freqs, P), "fcd": np.concatenate([e["fcd"] for e in emps]), "metastability": float(np.mean([e["metastability"] for e in emps])),
            "n_volumes": int(np.mean([e["n_volumes"] for e in emps])), "tr": tr, "n_subjects": len(emps),
-           "filtered_runs": [r for e in emps for r in e.get("filtered_runs", [])], "taus": emps[0].get("taus", [1])}
+           "filtered_runs": [r for e in emps for r in e.get("filtered_runs", [])], "taus": emps[0].get("taus", [1]),
+           "NDTE": (np.mean([e["NDTE"] for e in emps], 0) if all(e.get("NDTE") is not None for e in emps) else None),
+           "ndte_max_lag": emps[0].get("ndte_max_lag", 10)}
     if all("COVtaus" in e for e in emps):
         out["COVtaus"] = [np.mean([e["COVtaus"][k] for e in emps], 0) for k in range(len(emps[0]["COVtaus"]))]
     return out
@@ -427,6 +436,20 @@ def fit_one(model: str, emp: dict, SC: np.ndarray, G: float, a, cfg: dict, atlas
                     "n_iter": res.n_iter, "best_iter": res.best_iter, "converged": res.converged, "a_fit": None, "omega_fit": omega.tolist()})
     else:
         raise ValueError(model)
+    if emp.get("NDTE") is not None:
+        try:
+            from .models.ndte import ndte as _ndte, ndte_similarity
+            from .models.search import linear_ndte_metrics
+
+            if model == "linear":
+                out["metrics"].update(linear_ndte_metrics(EC, 1.0, out.get("a_fit") if out.get("a_fit") is not None else a, np.asarray(out["omega_fit"], float), tr, beta,
+                                                          band if cfg_get(cfg, "model.linear.filter_consistent", True) else None, emp["NDTE"], int(emp.get("ndte_max_lag", 10))))
+            else:
+                _, _, tss = simulated_moments(EC / max(EC.max(), 1e-12) * sc_max, float(EC.max() / sc_max), a, omega, tr, int(emp.get("n_volumes", 500)), band, tau, beta=beta,
+                                              dt=float(m.get("dt", 0.1)), n_sim=2, seed=int(cfg_get(cfg, "model.nonlinear.seed", 0)), transient_s=float(m.get("transient_s", 100.0)), return_ts=True)
+                out["metrics"].update(ndte_similarity(emp["NDTE"], np.mean([_ndte(x, int(emp.get("ndte_max_lag", 10))) for x in tss], 0)))
+        except Exception as e:  # noqa: BLE001
+            LOG.warning("NDTE fit metric failed: %s", e)
     out["EC"] = EC
     out["EC_norm"] = EC / max(EC.max(), 1e-12) * sc_max
     out["G_eff"] = float(EC.max() / sc_max)

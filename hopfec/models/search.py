@@ -25,10 +25,10 @@ from .hopf_linear import analytic_moments, build_jacobian, linear_stability
 from .hopf_nonlinear import simulated_moments
 from .signal import fcd_distribution, ks_distance, metastability
 
-METRICS = ("fit_rmse", "fc_rmse", "fc_corr", "tau_rmse", "fcd_ks", "meta_diff", "combined")
+METRICS = ("fit_rmse", "fc_rmse", "fc_corr", "tau_rmse", "fcd_ks", "meta_diff", "combined", "ndte_corr", "ndte_rmse")
 LOWER_IS_BETTER = {"fit_rmse": True, "fc_rmse": True, "fc_corr": False, "tau_rmse": True, "fcd_ks": True,
-                   "meta_diff": True, "combined": True}
-_NAN_METRICS = {k: float("nan") for k in ("fc_rmse", "tau_rmse", "fit_rmse", "fc_corr", "tau_corr", "fcd_ks", "meta_sim", "meta_diff")}
+                   "meta_diff": True, "combined": True, "ndte_corr": False, "ndte_rmse": True}
+_NAN_METRICS = {k: float("nan") for k in ("fc_rmse", "tau_rmse", "fit_rmse", "fc_corr", "tau_corr", "fcd_ks", "meta_sim", "meta_diff", "ndte_corr", "ndte_rmse")}
 
 SEARCH_DEFAULTS = {
     "border_action": "extend",   # extend | warn | ignore
@@ -41,8 +41,9 @@ SEARCH_DEFAULTS = {
     "refine_points": 7,          # points per axis in the refinement window (+- one coarse step)
     "interpolate": True,         # parabolic interpolation through the optimum and its neighbours
     "continuous": False,         # continuous optimisation of (G, a) after the grid stages
-    "continuous_method": "auto", # auto: L-BFGS-B (linear model, fit_rmse) else Powell
+    "continuous_method": "auto", # auto: L-BFGS-B (linear model, fit_rmse) else Powell | pso (particle swarm)
     "continuous_max_fev": 60,
+    "pso": {"n_particles": 20, "n_iter": 30, "stall_iter": 8},
 }
 
 
@@ -61,14 +62,22 @@ def _eval_point(model: str, G: float, a, SC, omega, emp: dict, tr: float, band, 
             out["valid"] = False
             out["reason"] = f"unstable linearisation (max Re eig {st['max_real_eig']:.3g} >= 0; needs a_j < G*sum_k C_jk)"
             return out
+    need_ndte = "NDTE" in emp and emp["NDTE"] is not None
     if model == "linear" and not need_fcd:
         FC, COV = analytic_moments(SC, G, a, omega, tr, tau_tr, beta, filt={"band": band} if filter_consistent else None)
         out.update(fit_error(FC_emp, FC, COV_emp, COV))
+        if need_ndte:
+            out.update(linear_ndte_metrics(SC, G, a, omega, tr, beta, band if filter_consistent else None, emp["NDTE"], int(emp.get("ndte_max_lag", 10))))
         return out
     n_vol = int(emp.get("n_volumes", 500))
     FC, COV, tss = simulated_moments(SC, G, a, omega, tr, n_vol, band, tau_tr, beta=beta, dt=dt, n_sim=n_sim, seed=seed,
                                      transient_s=transient_s, linear=(model == "linear"), use_numba=use_numba, return_ts=True)
     out.update(fit_error(FC_emp, FC, COV_emp, COV))
+    if need_ndte:
+        from .ndte import ndte, ndte_similarity
+
+        nd = np.mean([ndte(xf, int(emp.get("ndte_max_lag", 10))) for xf in tss], axis=0)
+        out.update(ndte_similarity(emp["NDTE"], nd))
     if need_fcd:
         ks, metas = [], []
         for xf in tss:
@@ -78,6 +87,19 @@ def _eval_point(model: str, G: float, a, SC, omega, emp: dict, tr: float, band, 
         out["meta_sim"] = float(np.mean(metas))
         out["meta_diff"] = float(abs(np.mean(metas) - emp.get("metastability", np.nan)))
     return out
+
+
+def linear_ndte_metrics(C, G, a, omega, tr, beta, band, ndte_emp, max_lag: int = 10) -> dict:
+    """NDTE of the linear model (analytic, filter-consistent lagged covariances) vs the empirical NDTE."""
+    from .linear_gradient import _filter_weights, forward_moments_multi
+    from .ndte import ndte_linear_model, ndte_similarity
+
+    N = C.shape[0]
+    A = build_jacobian(C, G, a, omega)
+    h2 = _filter_weights(tr, band)
+    S0, Sts, _ = forward_moments_multi(A, beta, tr, list(range(1, int(max_lag))), h2)
+    nd = ndte_linear_model([S0[:N, :N]] + [St[:N, :N] for St in Sts])
+    return ndte_similarity(ndte_emp, nd)
 
 
 def _finalize(df: pd.DataFrame, metric: str) -> pd.DataFrame:
@@ -249,7 +271,7 @@ def interpolate_optimum(df: pd.DataFrame, best: dict, metric: str) -> dict:
 def continuous_search(model: str, SC, omega, emp, tr, G0: float, a0: float, band, fit_a: bool, metric: str,
                       bounds_G: tuple[float, float], bounds_a: tuple[float, float], tau_tr=1, beta=0.02, dt=0.1, n_sim=1,
                       seed=0, transient_s=100.0, filter_consistent=True, fcd_cfg=None, method: str = "auto",
-                      max_fev: int = 60, use_numba="auto", a_fn=None, a_grad=None) -> dict:
+                      max_fev: int = 60, use_numba="auto", a_fn=None, a_grad=None, pso_cfg: dict | None = None) -> dict:
     """Continuous optimisation of G (and a) starting from the grid optimum.
 
     Linear model + fit_rmse: exact loss/gradient (adjoint) with L-BFGS-B.  Otherwise Powell on the metric
@@ -268,6 +290,33 @@ def continuous_search(model: str, SC, omega, emp, tr, G0: float, a0: float, band
     x0 = np.array([G0, a0]) if fit_a else np.array([G0])
     bounds = [(lo_G, hi_G)] + ([(lo_a, hi_a)] if fit_a else [])
     nfev = {"n": 0}
+    if method == "pso":
+        from .pso import pso_minimize
+
+        lib = LOWER_IS_BETTER.get(metric, True)
+        pso_cfg = pso_cfg or {}
+
+        def fun_pso(x):
+            G = float(x[0])
+            a = float(x[1]) if fit_a else a0
+            r = _eval_point(model, G, a, SC, omega, emp, tr, band, tau_tr, beta, dt, n_sim, seed, transient_s, filter_consistent,
+                            metric in ("fcd_ks", "meta_diff", "combined"), fcd_cfg or {}, use_numba, a_fn)
+            if metric == "combined":
+                r["combined"] = (1 - r["fc_corr"]) + r.get("fcd_ks", 0.0)
+            v = r.get(metric, np.nan)
+            if not np.isfinite(v):
+                return 1e6
+            return v if lib else -v
+
+        res = pso_minimize(fun_pso, bounds, n_particles=int(pso_cfg.get("n_particles", 20)), n_iter=int(pso_cfg.get("n_iter", 30)), x0=x0,
+                           seed=seed, n_jobs=int(pso_cfg.get("n_jobs", 1)), stall_iter=int(pso_cfg.get("stall_iter", 8)))
+        value = float(res["fun"] if lib else -res["fun"])
+        G_opt = float(res["x"][0])
+        a_opt = float(res["x"][1]) if fit_a else a0
+        hits = {"G": "low" if np.isclose(G_opt, lo_G) else "high" if np.isclose(G_opt, hi_G) else None,
+                "a": ("low" if np.isclose(a_opt, lo_a) else "high" if np.isclose(a_opt, hi_a) else None) if fit_a else None}
+        return {"G": G_opt, "a": a_opt, metric: value, "method": "PSO (particle swarm)", "success": bool(res["converged"]), "n_fev": int(res["n_fev"]),
+                "message": f"{res['n_iter']} swarm iterations", "bound_hits": hits, "history": res["history"]}
     if use_grad:
         from .linear_gradient import _filter_weights, backward_moments, forward_moments, grads_to_params, loss_and_grad_moments
 
@@ -431,7 +480,7 @@ def adaptive_search(model: str, SC, omega, emp, tr, G_values, a_values, band, se
                                  bounds_G=caps["G"], bounds_a=caps["a"], tau_tr=tau_tr, beta=beta, dt=dt, n_sim=n_sim, seed=seed,
                                  transient_s=transient_s, filter_consistent=filter_consistent, fcd_cfg=fcd_cfg,
                                  method=s["continuous_method"], max_fev=int(s["continuous_max_fev"]), use_numba=use_numba,
-                                 a_fn=a_fn, a_grad=a_grad)
+                                 a_fn=a_fn, a_grad=a_grad, pso_cfg={**s.get("pso", {}), "n_jobs": n_jobs})
         better = (cont[metric] <= float(best[metric])) if LOWER_IS_BETTER.get(metric, True) else (cont[metric] >= float(best[metric]))
         if np.isfinite(cont[metric]) and (better or cont["success"]):
             used = {"G": cont["G"], "a": cont["a"], "source": f"continuous ({cont['method']})"}

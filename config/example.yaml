@@ -93,6 +93,10 @@ model:
     fit_omega: true                 # co-estimate node frequencies (recommended)
     fit_a: none                     # none | global | node
     lambda_sc: 0.0                  # L2 pull towards the structural prior
+  ndte:
+    enabled: false                  # normalised directed transfer entropy: fit/validation metric (ndte_corr); `hopfec ndte` stage
+    max_lag: 10
+    n_surrogates: 100
   heterogeneity:
     enabled: false                  # a_j = a0 + beta * z_j from a brain map (e.g. T1w/T2w myelin); beta searched with G
     map: null                       # {name: myelin, file: ./maps/myelin_parcels.tsv}  or  {name: myelin, neuromaps: {source: hcps1200, desc: myelinmap, space: fsLR, den: 32k}, surface_labels: atlas.dlabel.nii}

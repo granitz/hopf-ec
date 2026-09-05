@@ -114,6 +114,32 @@ as `*_desc-heterogeneity_a.tsv` / `.json` (beta, G, range of a_j, number of supe
 synthetic system with a_j = -0.05 + 0.03 z_j the search recovered G and beta exactly.  One map per run in
 this version; several maps can be compared across runs (`fit_summary_*.json` records the map).
 
+## Normalised directed transfer entropy (NDTE)
+
+`hopfec ndte` computes, per participant (runs concatenated) and per group, the NDTE of Deco, Vidaurre &
+Kringelbach (Nat Hum Behav 2021) - Gaussian transfer entropy from the past of a source to the present of a
+target, conditioned on the target's own past and normalised by the information the joint past carries
+about the present, with `max_lag` lags (default 10, as in the paper).  The implementation is a vectorised
+equivalent of the original MATLAB (`ndte_example_surrogates_fixlags_cs.m`; identical to 1e-14 on test
+data), with circular-shift surrogates (`n_surrogates`, default 100) giving z-scores, KDE and empirical
+p-values and an FDR mask; in-, out- and total flow per region are reported (the basis of the
+"functional rich club" / global-workspace ranking).  Convention: `NDTE[i, k]` = flow from k to i.
+
+For the *linear* model the NDTE follows analytically from the filter-consistent lagged covariances
+(block-Toeplitz lagged covariance -> Schur complements), so `ndte_corr` / `ndte_rmse` are available as
+search metrics without simulation (r = 0.997 against long simulations), for the non-linear model they
+are computed from the simulated BOLD.  The fitted ECs are additionally scored by `ndte_corr`
+(`model.ndte.enabled: true`).
+
+## Particle swarm optimisation
+
+`model.search.continuous_method: pso` replaces the local optimiser by a constricted particle swarm
+(`model.search.pso`: `n_particles`, `n_iter`, `stall_iter`) over (G, a or beta), evaluated in parallel with
+common random numbers - the global, derivative-free scheme of `fitt_hopf_a_particleswarm.m`, applicable
+to any metric including `ndte_corr` and `fcd_ks`.  Unlike the original script the swarm is not used for the
+N^2 coupling entries (hopeless for a 20-particle swarm); the coupling is estimated with the gradient /
+surrogate methods and validated against NDTE.
+
 ## Parameter search / error surface
 
 `model.search.G` (and optionally `model.search.a`) define the coarse grid; the homogeneous model

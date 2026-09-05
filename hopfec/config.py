@@ -144,8 +144,9 @@ DEFAULTS: dict[str, Any] = {
             "refine_points": 7,
             "interpolate": True,        # parabolic interpolation through the optimum
             "continuous": False,        # continuous (G, a) optimisation after the grid stages
-            "continuous_method": "auto",  # auto = L-BFGS-B with analytic gradient (linear, fit_rmse) else Powell
+            "continuous_method": "auto",  # auto = L-BFGS-B with analytic gradient (linear, fit_rmse) else Powell | pso
             "continuous_max_fev": 60,
+            "pso": {"n_particles": 20, "n_iter": 30, "stall_iter": 8},
         },
         "gec": {
             "eps_fc": 0.001,
@@ -190,6 +191,14 @@ DEFAULTS: dict[str, Any] = {
             "use_numba": "auto",
         },
         "fcd": {"window_tr": 30, "step_tr": 3},
+        "ndte": {
+            "enabled": False,           # empirical NDTE per participant (fit metric ndte_corr; search metric ndte_corr / ndte_rmse)
+            "max_lag": 10,
+            "n_surrogates": 100,        # `hopfec ndte` stage: circular-shift surrogates for z / p / FDR
+            "seed": 0,
+            "fdr_q": 0.05,
+            "p_source": "kde",          # kde (as in the original code) | gauss | empirical
+        },
         "heterogeneity": {
             "enabled": False,           # heterogeneous bifurcation parameter a_j = a0 + beta * z_j (z: z-scored brain map)
             "map": None,                # {name, file: <tsv|nii.gz>} or {name, neuromaps: {source, desc, space, den|res}, surface_labels}
@@ -430,6 +439,10 @@ model:
     fit_omega: true                 # co-estimate node frequencies (recommended)
     fit_a: none                     # none | global | node
     lambda_sc: 0.0                  # L2 pull towards the structural prior
+  ndte:
+    enabled: false                  # normalised directed transfer entropy: fit/validation metric (ndte_corr); `hopfec ndte` stage
+    max_lag: 10
+    n_surrogates: 100
   heterogeneity:
     enabled: false                  # a_j = a0 + beta * z_j from a brain map (e.g. T1w/T2w myelin); beta searched with G
     map: null                       # {name: myelin, file: ./maps/myelin_parcels.tsv}  or  {name: myelin, neuromaps: {source: hcps1200, desc: myelinmap, space: fsLR, den: 32k}, surface_labels: atlas.dlabel.nii}

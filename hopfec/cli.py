@@ -191,6 +191,19 @@ def cmd_sc(args):
     print(json.dumps(res, indent=2, default=str))
 
 
+def cmd_ndte(args):
+    from .stages import get_atlas, load_participants, run_ndte_stage
+
+    cfg = _setup(args)
+    df = load_participants(cfg, args.participant_label)
+    atlas = get_atlas(cfg)
+    if args.n_surrogates is not None:
+        cfg["model"]["ndte"]["n_surrogates"] = args.n_surrogates
+    if args.max_lag is not None:
+        cfg["model"]["ndte"]["max_lag"] = args.max_lag
+    print(json.dumps(run_ndte_stage(cfg, df, atlas, _n_jobs(cfg)), indent=2, default=str))
+
+
 def cmd_fit(args):
     from .pipeline import run_fit_stage
     from .stages import get_atlas, load_participants
@@ -237,6 +250,10 @@ def cmd_run(args):
                 LOG.info("sc stage: nothing to build (source=%s); SC will be read at fit time", src)
         elif st == "fit":
             run_fit_stage(cfg, df, atlas, n_jobs=n_jobs)
+        elif st == "ndte":
+            from .stages import run_ndte_stage
+
+            run_ndte_stage(cfg, df, atlas, n_jobs)
         else:
             raise SystemExit(f"unknown stage {st}")
 
@@ -290,6 +307,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(s)
     s.set_defaults(func=cmd_sc)
 
+    s = sub.add_parser("ndte", help="normalised directed transfer entropy (Deco et al. 2021) per participant with surrogates + group averages")
+    s.add_argument("--n-surrogates", type=int)
+    s.add_argument("--max-lag", type=int)
+    _add_common(s)
+    s.set_defaults(func=cmd_ndte)
+
     s = sub.add_parser("fit", help="fit effective connectivity (participant + group level, parameter search)")
     s.add_argument("--model", choices=["linear", "nonlinear", "both"], default=None)
     s.add_argument("--method", choices=["gradient", "gec"], help="linear model estimator")
@@ -299,7 +322,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_fit)
 
     s = sub.add_parser("run", help="run the stages listed in the config (timeseries, sc, fit)")
-    s.add_argument("--stages", nargs="*", choices=["fmriprep", "timeseries", "sc", "fit"])
+    s.add_argument("--stages", nargs="*", choices=["fmriprep", "timeseries", "sc", "fit", "ndte"])
     _add_common(s)
     s.set_defaults(func=cmd_run)
     return p

@@ -77,3 +77,10 @@ Linear estimators: `model.linear.method: gradient | whittle | gec`; `model.tau_t
 `model.heterogeneity`: `enabled`, `map` (`{name, file}` for a per-parcel TSV/CSV or an MNI NIfTI; or
 `{name, neuromaps: {source, desc, space, den|res}, surface_labels}` — needs `pip install neuromaps`),
 `a0` (default `model.a`), `beta` (search grid), `clip`, `zscore`.
+
+## NDTE and particle swarm
+
+`model.ndte`: `enabled` (empirical NDTE per participant and `ndte_corr` fit metric), `max_lag` (10),
+`n_surrogates` (100, `hopfec ndte` stage only), `seed`, `fdr_q`.  `hopfec ndte -c cfg.yaml` writes
+`sub-*_atlas-*_desc-ndte_connectivity.tsv` (+ `_desc-ndteZ`, `_desc-ndteP`, `_desc-ndteSig`, flows JSON) and group
+averages.  `model.search.continuous_method: pso` with `model.search.pso: {n_particles, n_iter, stall_iter}`.
