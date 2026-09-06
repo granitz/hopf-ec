@@ -249,6 +249,22 @@ def parabolic_vertex(x: np.ndarray, y: np.ndarray, i: int, lower_is_better: bool
     return float(xv)
 
 
+def _validated_used(model: str, used: dict, fallback: dict, SC, omega, a_fn, info: dict) -> dict:
+    """The interpolated / continuous optimum is off the evaluated grid: for the linear model make sure its
+    linearisation is stable, otherwise fall back to the (validated) grid optimum."""
+    if model != "linear" or used.get("source") in ("grid", "refined_grid"):
+        return used
+    a = a_fn(float(used["a"])) if a_fn is not None else float(used["a"])
+    st = linear_stability(SC, float(used["G"]), a, omega)
+    if st["stable"]:
+        return used
+    msg = (f"{used['source']} optimum (G={used['G']:.4g}, a={used['a']:.4g}) has an unstable linearisation "
+           f"(max Re eig {st['max_real_eig']:.3g}); using the grid optimum (G={fallback['G']:.4g}, a={fallback['a']:.4g}) instead")
+    LOG.warning(msg)
+    info["warnings"].append(msg)
+    return {"G": float(fallback["G"]), "a": float(fallback["a"]), "source": f"refined_grid ({used['source']} point unstable)"}
+
+
 def interpolate_optimum(df: pd.DataFrame, best: dict, metric: str) -> dict:
     """Axis-wise parabolic interpolation through the best point on the finest available grid."""
     out = {"G": float(best["G"]), "a": float(best["a"]), "interpolated_axes": []}
@@ -472,7 +488,7 @@ def adaptive_search(model: str, SC, omega, emp, tr, G_values, a_values, band, se
     if s["interpolate"]:
         interp = interpolate_optimum(df, best, metric)
         if interp["interpolated_axes"]:
-            used = {"G": interp["G"], "a": interp["a"], "source": "parabolic_interpolation"}
+            used = _validated_used(model, {"G": interp["G"], "a": interp["a"], "source": "parabolic_interpolation"}, best_refined, SC, omega, a_fn, info)
     # ---- continuous optimisation
     cont = None
     if s["continuous"]:
@@ -483,7 +499,7 @@ def adaptive_search(model: str, SC, omega, emp, tr, G_values, a_values, band, se
                                  a_fn=a_fn, a_grad=a_grad, pso_cfg={**s.get("pso", {}), "n_jobs": n_jobs})
         better = (cont[metric] <= float(best[metric])) if LOWER_IS_BETTER.get(metric, True) else (cont[metric] >= float(best[metric]))
         if np.isfinite(cont[metric]) and (better or cont["success"]):
-            used = {"G": cont["G"], "a": cont["a"], "source": f"continuous ({cont['method']})"}
+            used = _validated_used(model, {"G": cont["G"], "a": cont["a"], "source": f"continuous ({cont['method']})"}, best_refined, SC, omega, a_fn, info)
         info["continuous"] = cont
     final = dict(best)
     final.update({"G": used["G"], "a": used["a"], "source": used["source"], "G_grid": best_refined["G"], "a_grid": best_refined["a"]})

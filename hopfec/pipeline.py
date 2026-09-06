@@ -276,6 +276,9 @@ def run_search(model: str, SC: np.ndarray, emp: dict, cfg: dict, out_base: Path,
     a_axis = "a"
     if hetero:
         z, a0h, clip = np.asarray(hetero["z"], float), float(hetero["a0"]), hetero.get("clip")
+        if s.get("a") is not None:
+            LOG.warning("model.search.a is ignored with heterogeneity enabled: the a axis is the map weight beta "
+                        "(grid heterogeneity.beta) around a0 = %.3g (heterogeneity.a0)", a0h)
         a_fn = (lambda b, z=z, a0h=a0h, clip=clip: (np.clip(a0h + b * z, clip[0], clip[1]) if clip else a0h + b * z))
         a_grad = (lambda b, z=z: z)
         a_values = np.asarray(hetero["beta_values"], float)
@@ -299,7 +302,11 @@ def run_search(model: str, SC: np.ndarray, emp: dict, cfg: dict, out_base: Path,
     refined = df[df["stage"] == "refined"] if "stage" in df.columns else None
     plot_error_surface(Gs, As, surf, metric, Path(str(out_base) + "_desc-errorsurface.png"), best, title=title,
                        extra_points=refined, used=(best["G"], best["a"]), grid_best=(best.get("G_grid", best["G"]), best.get("a_grid", best["a"])))
-    save_json(Path(str(out_base) + "_desc-search.json"), {"best": best, "metric": metric, "G_values": Gs, "a_values": As, "n_points": len(df), **info})
+    hinfo = {}
+    if hetero:
+        av = a_fn(float(best["a"]))
+        hinfo = {"a0": float(hetero["a0"]), "beta": float(best["a"]), "a_j_range": [float(np.min(av)), float(np.max(av))], "n_supercritical": int(np.sum(av > 0))}
+    save_json(Path(str(out_base) + "_desc-search.json"), {"best": best, "metric": metric, "G_values": Gs, "a_values": As, "n_points": len(df), **info, **hinfo})
     LOG.info("%s search (%s): G=%.4g %s=%.4g via %s; %s=%.4g at the grid optimum%s", model, title, best["G"], a_axis, best["a"], best.get("source", "grid"),
              metric, best[metric], "; WARNINGS: " + " | ".join(info["warnings"]) if info.get("warnings") else "")
     best["a_axis"] = a_axis
@@ -312,6 +319,9 @@ def run_search(model: str, SC: np.ndarray, emp: dict, cfg: dict, out_base: Path,
 def _first_tau(m: dict) -> int:
     t = m.get("tau_tr", 1)
     return int(t[0]) if isinstance(t, (list, tuple)) else int(t)
+
+
+HETERO_A0_DEFAULT = -0.1  # baseline of a_j = a0 + beta z_j: leaves room for beta * z_j before any node destabilises the linear model
 
 
 def _scalar_a(m: dict) -> float:
@@ -618,7 +628,7 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
         from .maps import load_parcel_map
 
         pmap = load_parcel_map({**hcfg["map"], "zscore": hcfg.get("zscore", True)}, atlas)
-        a0h = float(hcfg.get("a0") if hcfg.get("a0") is not None else _scalar_a(m))
+        a0h = float(hcfg.get("a0") if hcfg.get("a0") is not None else HETERO_A0_DEFAULT)
         hetero = {"z": pmap.z, "a0": a0h, "clip": tuple(hcfg.get("clip") or (-0.9, 0.9)), "beta_values": linspace_spec(hcfg.get("beta", {"start": -0.05, "stop": 0.05, "num": 11})), "map": pmap}
         save_matrix(out_dir / "sc" / f"atlas-{aslug}_desc-map{slug(pmap.name)}_values.tsv", np.c_[pmap.values, pmap.z], ["value", "z"])
         summary["heterogeneity"] = {"map": pmap.name, "source": pmap.source, "n_missing": pmap.n_missing, "a0": a0h}

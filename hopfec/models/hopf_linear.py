@@ -1,7 +1,7 @@
 """Linear (Ornstein-Uhlenbeck) approximation of the Hopf whole-brain model.
 
 Linearising  dz_j/dt = (a_j + i w_j - |z_j|^2) z_j + G sum_k C_jk (z_k - z_j) + beta eta_j
-around z = 0 (valid for a_j < 0) gives dX = A X dt + beta dW with X = (x, y) and
+around z = 0 (valid while A is stable; all a_j < 0 suffices) gives dX = A X dt + beta dW with X = (x, y) and
 
     A = [[diag(a - G s) + G C,  -diag(w)],
          [diag(w),               diag(a - G s) + G C]],   s_j = sum_k C_jk.

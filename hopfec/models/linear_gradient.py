@@ -235,6 +235,9 @@ class GradientFitResult:
                 "message": str(self.message), "elapsed_s": self.elapsed_s, **self.metrics}
 
 
+UNSTABLE_LOSS_FACTOR = 10.0  # penalty (x initial loss) returned for an unstable linearisation during the EC fit
+
+
 def fit_linear_gradient(FC_emp: np.ndarray, COVtau_emp: np.ndarray, C0: np.ndarray, mask: np.ndarray, omega: np.ndarray,
                         tr: float, tau_tr: int = 1, a=-0.02, beta: float = 0.02, band=None, filter_order: int = 2,
                         w_fc: float = 1.0, w_tau: float = 1.0, lambda_sc: float = 0.0, C_prior: np.ndarray | None = None,
@@ -276,13 +279,29 @@ def fit_linear_gradient(FC_emp: np.ndarray, COVtau_emp: np.ndarray, C0: np.ndarr
         return C, av, w
 
     history: list[dict] = []
-    state = {"fev": 0}
+    state = {"fev": 0, "n_unstable": 0, "loss0": None}
+
+    def _max_real_eig(A: np.ndarray) -> float:
+        return float(np.max(np.real(la.eigvals(A))))
+
+    def _penalty(theta):
+        # Unstable linearisation (some a_j crossed its coupled in-strength sum_k C_jk while C moved): the
+        # model has no stationary covariance there.  A large finite loss with zero gradient makes the
+        # L-BFGS-B line search backtrack instead of propagating NaNs into the Frechet derivative.
+        state["n_unstable"] += 1
+        return UNSTABLE_LOSS_FACTOR * float(state["loss0"] or 1.0), np.zeros_like(theta)
 
     def fun(theta):
         C, av, w = unpack(theta)
         A = build_jacobian(C, 1.0, av, w)
+        if not np.isfinite(A).all() or _max_real_eig(A) >= 0.0:
+            return _penalty(theta)
         S0, Sts, cache = forward_moments_multi(A, beta, tr, taus, h2)
         loss, G_S0, G_Sts, R, Cts = loss_and_grad_moments_multi(S0, Sts, N, FC_emp, COV_list, w_fc, w_tau)
+        if not (np.isfinite(loss) and np.isfinite(S0).all()):
+            return _penalty(theta)
+        if state["loss0"] is None:
+            state["loss0"] = float(loss)
         Ct = Cts[0]
         G_A = backward_moments_multi(G_S0, G_Sts, A, tr, h2, cache)
         gC, ga, gw = grads_to_params(G_A, N, 1.0)
@@ -318,6 +337,12 @@ def fit_linear_gradient(FC_emp: np.ndarray, COVtau_emp: np.ndarray, C0: np.ndarr
             LOG.info("grad-fit it %4d  loss=%.5g  fit_rmse=%.4f  fc_corr=%.3f", len(history), loss, m["fit_rmse"], m["fc_corr"])
 
     theta0 = np.concatenate([C0[idx]] + ([np.array([a0.mean()])] if n_a == 1 else []) + ([a0] if n_a == N else []) + ([omega0] if n_w else []))
+    C_0, av_0, w_0 = unpack(theta0)
+    A0 = build_jacobian(C_0, 1.0, av_0, w_0)
+    mre0 = _max_real_eig(A0)
+    if not np.isfinite(mre0) or mre0 >= 0.0:
+        raise ValueError(f"linear gradient fit: the linearisation is unstable at the starting point (max Re eig {mre0:.3g} >= 0; "
+                         f"max a_j = {a0.max():.3g}, {int(np.sum(a0 > 0))} supercritical node(s)); lower a0 / beta or the coupling G")
     hi = c_max if c_max is not None else None
     bounds = [(0.0, hi)] * n_c + [tuple(a_bounds)] * n_a + [(1e-4, None)] * n_w
     res = minimize(fun, theta0, jac=True, method="L-BFGS-B", bounds=bounds, callback=cb,
@@ -331,6 +356,10 @@ def fit_linear_gradient(FC_emp: np.ndarray, COVtau_emp: np.ndarray, C0: np.ndarr
                             success=bool(res.success), message=str(res.message), history=history, FC_sim=R, COVtau_sim=Ct,
                             elapsed_s=time.time() - t0)
     out.metrics = fit_error(FC_emp, R, COV_list[0], Ct)
+    out.metrics["n_unstable_evaluations"] = int(state["n_unstable"])
+    if state["n_unstable"]:
+        LOG.warning("linear gradient fit: %d/%d evaluations hit an unstable linearisation and were rejected "
+                    "(the a_j profile is close to the validity limit of the linear model)", state["n_unstable"], state["fev"] + state["n_unstable"])
     if len(taus) > 1:
         out.metrics["tau_rmse_all_lags"] = float(np.mean([rmse(COV_list[k], Cts[k]) for k in range(len(taus))]))
         out.COVtau_sim_all = Cts

@@ -99,3 +99,74 @@ def test_gradient_fit_reports_bound_hits(truth):
     assert "n_a_at_lower" in r.metrics and r.bound_hits["n_a_at_lower"] + r.bound_hits["n_a_at_upper"] >= 0
     # truth a = -0.05 lies below the lower bound -> the fitted a should sit on it
     assert r.bound_hits["n_a_at_lower"] == 1
+
+
+def _a_near_limit(SC, G, omega, nodes, frac, base=-0.05):
+    """a_j = base except on `nodes`, where a_j = t * (largest t keeping the linearisation stable), by bisection."""
+    from hopfec.models.hopf_linear import linear_stability
+
+    def a_of(t):
+        a = np.full(SC.shape[0], base)
+        a[nodes] = t
+        return a
+
+    lo, hi = 0.0, 5.0
+    for _ in range(50):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if linear_stability(SC, G, a_of(mid), omega)["stable"] else (lo, mid)
+    return a_of(frac * lo), lo
+
+
+def test_gradient_fit_stability_guard(truth):
+    """a_j profile with supercritical nodes: the fit must not crash (unstable steps are rejected) and must refuse
+    an unstable starting point with a clear message."""
+    from hopfec.models.linear_gradient import fit_linear_gradient
+    from hopfec.models.hopf_linear import linear_stability
+
+    t = truth
+    N = t["SC"].shape[0]
+    C0 = t["G_true"] * t["SC"]
+    top = np.argsort(C0.sum(axis=1))[-2:]
+    a, t_lim = _a_near_limit(t["SC"], t["G_true"], t["omega"], top, 0.9)
+    assert t_lim > 0 and a[top[0]] > 0 and linear_stability(t["SC"], t["G_true"], a, t["omega"])["stable"]
+    mask = make_mask(t["SC"], N, "sc")
+    r = fit_linear_gradient(t["emp"]["FC"], t["emp"]["COVtau"], C0, mask, t["omega"], t["tr"], 1, a, 0.02, t["band"], max_iter=60)
+    assert np.isfinite(r.loss) and "n_unstable_evaluations" in r.metrics
+    assert linear_stability(r.C, 1.0, a, t["omega"])["stable"]  # the accepted solution is always stable
+    a_bad, _ = _a_near_limit(t["SC"], t["G_true"], t["omega"], top, 1.5)
+    with pytest.raises(ValueError, match="unstable at the starting point"):
+        fit_linear_gradient(t["emp"]["FC"], t["emp"]["COVtau"], C0, mask, t["omega"], t["tr"], 1, a_bad, 0.02, t["band"], max_iter=5)
+
+
+def test_gradient_fit_penalty_path(truth):
+    """Start so close to the validity limit that L-BFGS-B steps cross it: the penalty branch must fire and the
+    returned solution must still be stable."""
+    from hopfec.models.linear_gradient import fit_linear_gradient
+    from hopfec.models.hopf_linear import linear_stability
+
+    t = truth
+    N = t["SC"].shape[0]
+    C0 = t["G_true"] * t["SC"]
+    a, _ = _a_near_limit(t["SC"], t["G_true"], t["omega"], np.arange(N), 1.0 - 1e-6)
+    assert linear_stability(t["SC"], t["G_true"], a, t["omega"])["stable"]
+    mask = make_mask(t["SC"], N, "sc")
+    r = fit_linear_gradient(t["emp"]["FC"], t["emp"]["COVtau"], C0, mask, t["omega"], t["tr"], 1, a, 0.02, t["band"], max_iter=30)
+    assert np.isfinite(r.loss) and r.metrics["n_unstable_evaluations"] > 0
+    assert linear_stability(r.C, 1.0, a, t["omega"])["stable"]
+
+
+def test_validated_used_falls_back_when_unstable(truth):
+    from hopfec.models.search import _validated_used
+
+    t = truth
+    info = {"warnings": []}
+    ok = {"G": 1.0, "a": -0.05, "source": "parabolic_interpolation"}
+    assert _validated_used("linear", ok, {"G": 0.9, "a": -0.05}, t["SC"], t["omega"], None, info) is ok and not info["warnings"]
+    bad = {"G": 1.0, "a": 0.5, "source": "parabolic_interpolation"}
+    used = _validated_used("linear", bad, {"G": 0.9, "a": -0.05}, t["SC"], t["omega"], None, info)
+    assert used["G"] == 0.9 and used["a"] == -0.05 and "unstable" in used["source"] and len(info["warnings"]) == 1
+    # heterogeneity: the axis value is beta, a_fn maps it to the node vector
+    z = np.linspace(-1, 1, t["SC"].shape[0])
+    a_fn = lambda b: -0.1 + b * z  # noqa: E731
+    assert _validated_used("linear", {"G": 1.0, "a": 0.02, "source": "continuous (lbfgs)"}, {"G": 1.0, "a": 0.0}, t["SC"], t["omega"], a_fn, info)["a"] == 0.02
+    assert _validated_used("nonlinear", bad, {"G": 0.9, "a": -0.05}, t["SC"], t["omega"], None, info) is bad

@@ -100,7 +100,8 @@ model:
   heterogeneity:
     enabled: false                  # a_j = a0 + beta * z_j from a brain map (e.g. T1w/T2w myelin); beta searched with G
     map: null                       # {name: myelin, file: ./maps/myelin_parcels.tsv}  or  {name: myelin, neuromaps: {source: hcps1200, desc: myelinmap, space: fsLR, den: 32k}, surface_labels: atlas.dlabel.nii}
-    beta: {start: -0.05, stop: 0.05, num: 11}
+    a0: -0.1                        # baseline (all a_j = a0 + beta * z_j must keep the linearisation stable)
+    beta: {start: -0.05, stop: 0.05, num: 11}   # replaces search.a as the second search axis
   nonlinear:
     enabled: true
     init: linear                    # initialise from the linear EC (or: sc)

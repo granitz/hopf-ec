@@ -21,7 +21,9 @@ filtered like the data.  The numba kernel simulates ~10⁴ steps/s per 100 nodes
 
 ## Linear Hopf model (Ponce-Alvarez & Deco 2024) and filter-consistent moments
 
-Around `z = 0` (valid for `a < 0`) the model is `dX = A X dt + β dW` with
+Around `z = 0` (valid while the Jacobian `A` is stable, i.e. all its eigenvalues have negative real part;
+all `a_j < 0` is sufficient, and a node with `a_j > 0` is admissible as long as its coupled in-strength
+`G sum_k C_jk` exceeds `a_j`) the model is `dX = A X dt + β dW` with
 `A = [[diag(a − G s) + G C, −diag(ω)], [diag(ω), diag(a − G s) + G C]]`.  The stationary covariance
 solves `A Σ + Σ Aᵀ + β² I = 0` and `Cov(X(t+τ), X(t)) = expm(A τ) Σ`.  Because empirical BOLD is
 band-pass filtered, the model's TR-sampled covariance sequence is convolved with the filter's
@@ -111,7 +113,12 @@ at a0).  The search axis for `a` becomes the map weight `beta` (grid `heterogene
 extension, refinement, and the continuous optimiser with the chain-rule gradient sum_j (dL/da_j) z_j);
 the resulting a_j profile is used in all subsequent fits (participants, groups, non-linear model) and saved
 as `*_desc-heterogeneity_a.tsv` / `.json` (beta, G, range of a_j, number of supercritical nodes).  On a
-synthetic system with a_j = -0.05 + 0.03 z_j the search recovered G and beta exactly.  One map per run in
+synthetic system with a_j = -0.05 + 0.03 z_j the search recovered G and beta exactly.  Because the stability of
+the linearisation depends on C through the diagonal `a_j - sum_k C_jk`, the EC gradient fit rejects any step
+that makes the Jacobian unstable (large finite loss, zero gradient, so L-BFGS-B backtracks; the number of such
+evaluations is reported), refuses to start from an unstable point, and an interpolated / continuous optimum
+of the parameter search that turns out unstable is replaced by the validated grid optimum.  The default
+`a0 = -0.1` leaves room for `beta * z_j` (z-scored maps span roughly +-2) before any node turns supercritical.  One map per run in
 this version; several maps can be compared across runs (`fit_summary_*.json` records the map).
 
 ## Normalised directed transfer entropy (NDTE)
