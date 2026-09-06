@@ -67,3 +67,31 @@ def test_pipeline_heterogeneity(tmp_path):
     assert s["a_axis"] == "beta"
     fit = json.loads((out / "models" / "model-hopflinear" / "sub-01" / "sub-01_atlas-toydseg_model-hopflinear_desc-fit.json").read_text())
     assert isinstance(fit["a"], list) and len(fit["a"]) == N
+
+
+def test_table_with_missing_parcels(tmp_path):
+    atlas = _atlas(tmp_path)
+    (tmp_path / "m.tsv").write_text("index\tname\tmyelin\n1\tA_L\t1.5\n2\tA_R\tn/a\n3\tB_L\t2.5\n4\tB_R\t3.5\n")
+    pm = load_parcel_map({"name": "myelin", "file": str(tmp_path / "m.tsv")}, atlas)
+    assert pm.n_missing == 1 and np.isnan(pm.values[1]) and np.allclose(pm.values[[0, 2, 3]], [1.5, 2.5, 3.5])
+    assert pm.z[1] == 0.0 and abs(np.nanmean(pm.z[[0, 2, 3]])) < 1e-12  # missing parcel: z = 0 (stays at a0)
+
+
+def test_surface_parcellate_dlabel(tmp_path):
+    from nibabel import cifti2
+    from hopfec.maps import _surface_parcellate
+
+    atlas = _atlas(tmp_path)  # label ids 1..4: A_L, A_R, B_L, B_R
+    nv = 6
+    # dlabel: left surface (vertices 0..5 -> labels 1,1,1,3,3,3), right surface (2,2,2,4,4,4), one volume structure (label 4)
+    lab = np.r_[[1, 1, 1, 3, 3, 3], [2, 2, 2, 4, 4, 4], [4, 4]].astype(float)[None, :]
+    bm = cifti2.BrainModelAxis.from_mask(np.ones(nv, bool), name="CIFTI_STRUCTURE_CORTEX_LEFT") \
+        + cifti2.BrainModelAxis.from_mask(np.ones(nv, bool), name="CIFTI_STRUCTURE_CORTEX_RIGHT") \
+        + cifti2.BrainModelAxis.from_mask(np.zeros((2, 1, 1), bool) | np.array([[[True]], [[True]]]), name="CIFTI_STRUCTURE_THALAMUS_LEFT", affine=np.eye(4))
+    lax = cifti2.LabelAxis(["labels"], [{int(i): (f"l{i}", (0.0, 0.0, 0.0, 1.0)) for i in range(5)}])
+    img = cifti2.Cifti2Image(lab, header=cifti2.Cifti2Header.from_axes((lax, bm)))
+    nib.save(img, tmp_path / "atlas.dlabel.nii")
+    gl = nib.gifti.GiftiImage(darrays=[nib.gifti.GiftiDataArray(np.array([1, 2, 3, 10, 20, 30], np.float32))])
+    gr = nib.gifti.GiftiImage(darrays=[nib.gifti.GiftiDataArray(np.array([5, 5, 5, 7, 8, 9], np.float32))])
+    out = _surface_parcellate((gl, gr), atlas, str(tmp_path / "atlas.dlabel.nii"), "fslr", "32k")
+    assert np.allclose(out, [2.0, 5.0, 20.0, 8.0])

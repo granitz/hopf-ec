@@ -76,7 +76,9 @@ Linear estimators: `model.linear.method: gradient | whittle | gec`; `model.tau_t
 
 `model.heterogeneity`: `enabled`, `map` (`{name, file}` for a per-parcel TSV/CSV or an MNI NIfTI; or
 `{name, neuromaps: {source, desc, space, den|res}, surface_labels}` — needs `pip install neuromaps`),
-`a0` (default `model.a`), `beta` (search grid), `clip`, `zscore`.
+`a0` (default `model.a`), `beta` (search grid), `clip`, `zscore`.  Ready-made T1w/T2w myelin tables for the
+Schaefer+Tian atlases are in `maps/` (see `maps/README.md`; `scripts/make_parcel_map.py` builds others); the
+`file` path is relative to the working directory; parcels marked `n/a` stay at `a0`.
 
 ## NDTE and particle swarm
 

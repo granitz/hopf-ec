@@ -78,7 +78,7 @@ def read_parcel_table(path: Path, atlas: Atlas, value_column: str | None = None)
     except ValueError as e:
         if "values for" in str(e):
             raise
-    df = pd.read_csv(path, sep=sep, engine="python")
+    df = pd.read_csv(path, sep=sep, engine="python", na_values=["n/a", "NA", "nan", "NaN", ""])
     df.columns = [str(c) for c in df.columns]
     if df.shape[1] == 1:
         v = pd.to_numeric(df.iloc[:, 0], errors="coerce").to_numpy()
@@ -88,7 +88,11 @@ def read_parcel_table(path: Path, atlas: Atlas, value_column: str | None = None)
     cols_l = {c.lower(): c for c in df.columns}
     vcol = value_column or next((cols_l[c] for c in ("value", "map", "mean", "z", "score") if c in cols_l), None)
     if vcol is None:
-        num = [c for c in df.columns if c.lower() not in ("index", "id", "label", "name", "region", "hemisphere", "network") and pd.to_numeric(df[c], errors="coerce").notna().all()]
+        def _numeric(col: pd.Series) -> bool:  # every entry numeric or missing (n/a, NaN), at least one value
+            v = pd.to_numeric(col, errors="coerce")
+            return bool(v.notna().any() and (v.notna() | col.isna()).all())
+
+        num = [c for c in df.columns if c.lower() not in ("index", "id", "label", "name", "region", "hemisphere", "network") and _numeric(df[c])]
         if not num:
             raise ValueError(f"{path.name}: no numeric value column found (give value_column)")
         vcol = num[-1]
@@ -128,8 +132,8 @@ def _surface_parcellate(annotation, atlas: Atlas, surface_labels, space: str, de
             hemi_data.setdefault("L" if len(hemi_data) == 0 else "R", np.asarray(g.agg_data(), float))
         for name, slc, model in bm.iter_structures():
             key = "L" if "LEFT" in str(name) else "R" if "RIGHT" in str(name) else None
-            if key is None or key not in hemi_data or model.model_type != "CIFTI_MODEL_TYPE_SURFACE":
-                continue
+            if key is None or key not in hemi_data or not bool(np.all(model.surface_mask)):
+                continue  # volume (subcortical) structures of the dlabel have no surface annotation
             vals = hemi_data[key][model.vertex]
             labs = labels[slc]
             for l in np.unique(labs):
