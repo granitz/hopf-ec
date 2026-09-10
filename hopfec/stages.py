@@ -295,35 +295,47 @@ def summarize_inputs(cfg: dict, participants: pd.DataFrame) -> dict:
 def run_ndte_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, n_jobs: int = 1) -> dict:
     """Empirical NDTE with surrogates per participant (+ group averages)."""
     from .models.ndte import ndte_with_surrogates
+    from .nodes import determine_node_set, scan_node_validity
     from .pipeline import Subject, find_subject_timeseries, load_subject_empirical
 
     ncfg = dict(cfg_get(cfg, "model.ndte", {}) or {})
     out_dir = ensure_dir(cfg["paths"]["output_dir"])
     aslug = slug(atlas.name)
-    N = atlas.n_parcels
-    names = atlas.region_names
+    N_full = atlas.n_parcels
     subs = []
     for _, r in participants.iterrows():
         s = Subject(sub=r["participant_id"], group=r.get("group"))
         s.files = find_subject_timeseries(cfg, s.sub, atlas)
         if s.files:
             subs.append(s)
-    LOG.info("NDTE stage: %d participants, max_lag %s, %s surrogates", len(subs), ncfg.get("max_lag", 10), ncfg.get("n_surrogates", 100))
+    # model node set (parcels with valid data in every participant), as in the fit stage
+    valid = Parallel(n_jobs=n_jobs)(delayed(scan_node_validity)(s.files, N_full) for s in subs)
+    nodes = determine_node_set({s.sub: v for s, v in zip(subs, valid)}, atlas, cfg.get("nodes") or {})
+    subs = [s for s in subs if s.sub not in nodes.excluded_participants]
+    nodes.table().to_csv(out_dir / f"atlas-{aslug}_desc-nodes.tsv", sep="\t", index=False, float_format="%.4g")
+    names = nodes.subset_atlas(atlas).region_names
+    names_full = nodes.names
+
+    def savem(path, M):
+        return save_matrix(path, nodes.expand(M), names_full)
+
+    LOG.info("NDTE stage: %d participants, %d/%d parcels, max_lag %s, %s surrogates", len(subs), nodes.n_kept, N_full, ncfg.get("max_lag", 10), ncfg.get("n_surrogates", 100))
 
     def _job(s: Subject):
         try:
-            emp = load_subject_empirical(s.files, {**cfg, "model": {**cfg["model"], "ndte": {**ncfg, "enabled": False}}}, N)
+            emp = load_subject_empirical(s.files, {**cfg, "model": {**cfg["model"], "ndte": {**ncfg, "enabled": False}}}, N_full, nodes=nodes)
             X = np.concatenate(emp["filtered_runs"], axis=0)
             res = ndte_with_surrogates(X, int(ncfg.get("max_lag", 10)), int(ncfg.get("n_surrogates", 100)), int(ncfg.get("seed", 0)),
                                        float(ncfg.get("fdr_q", 0.05)), n_jobs=1, p_source=str(ncfg.get("p_source", "kde")))
             d = ensure_dir(out_dir / s.sub / "func")
             base = d / f"{s.sub}_atlas-{aslug}"
-            save_matrix(Path(str(base) + "_desc-ndte_connectivity.tsv"), res["ndte"], names)
+            savem(Path(str(base) + "_desc-ndte_connectivity.tsv"), res["ndte"])
             if "z" in res:
-                save_matrix(Path(str(base) + "_desc-ndteZ_connectivity.tsv"), res["z"], names)
-                save_matrix(Path(str(base) + "_desc-ndteP_connectivity.tsv"), res["p_kde"], names)
-                save_matrix(Path(str(base) + "_desc-ndteSig_connectivity.tsv"), res["sig_fdr"].astype(int), names)
-            pd.DataFrame({"region": names, "in_flow": res["in_flow"], "out_flow": res["out_flow"], "total_flow": res["total_flow"]}).to_csv(str(base) + "_desc-ndteFlow.tsv", sep="\t", index=False, float_format="%.6g")
+                savem(Path(str(base) + "_desc-ndteZ_connectivity.tsv"), res["z"])
+                savem(Path(str(base) + "_desc-ndteP_connectivity.tsv"), res["p_kde"])
+                savem(Path(str(base) + "_desc-ndteSig_connectivity.tsv"), res["sig_fdr"].astype(int))
+            pd.DataFrame({"region": names_full, "in_flow": nodes.expand_vec(res["in_flow"]), "out_flow": nodes.expand_vec(res["out_flow"]),
+                          "total_flow": nodes.expand_vec(res["total_flow"])}).to_csv(str(base) + "_desc-ndteFlow.tsv", sep="\t", index=False, float_format="%.6g")
             save_json(Path(str(base) + "_desc-ndte.json"), {"n_volumes": int(X.shape[0]), "max_lag": res["max_lag"], "n_surrogates": res["n_surrogates"],
                                                             "n_significant": int(res["sig_fdr"].sum()) if "sig_fdr" in res else None, "p_source": res.get("p_source")})
             return {"sub": s.sub, "group": s.group, "ndte": res["ndte"], "z": res.get("z"), "sig": res.get("sig_fdr"), "ok": True}
@@ -333,7 +345,7 @@ def run_ndte_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, n_jobs: 
 
     results = Parallel(n_jobs=n_jobs)(delayed(_job)(s) for s in subs)
     ok = [r for r in results if r["ok"]]
-    summary: dict = {"n_ok": len(ok), "n_failed": len(results) - len(ok), "groups": {}}
+    summary: dict = {"n_ok": len(ok), "n_failed": len(results) - len(ok), "groups": {}, "nodes": nodes.summary()}
     groups = {"all": ok}
     for r in ok:
         if r["group"]:
@@ -344,12 +356,13 @@ def run_ndte_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, n_jobs: 
         gd = ensure_dir(out_dir / "ndte")
         base = gd / f"group-{slug(g)}_atlas-{aslug}"
         mean = np.mean([r["ndte"] for r in rs], 0)
-        save_matrix(Path(str(base) + "_desc-ndteMean_connectivity.tsv"), mean, names)
+        savem(Path(str(base) + "_desc-ndteMean_connectivity.tsv"), mean)
         if all(r["z"] is not None for r in rs):
-            save_matrix(Path(str(base) + "_desc-ndteZmean_connectivity.tsv"), np.mean([r["z"] for r in rs], 0), names)
-            save_matrix(Path(str(base) + "_desc-ndteSigFraction_connectivity.tsv"), np.mean([r["sig"] for r in rs], 0), names)
+            savem(Path(str(base) + "_desc-ndteZmean_connectivity.tsv"), np.mean([r["z"] for r in rs], 0))
+            savem(Path(str(base) + "_desc-ndteSigFraction_connectivity.tsv"), np.mean([r["sig"] for r in rs], 0))
         flow_in, flow_out = mean.sum(1), mean.sum(0)
-        pd.DataFrame({"region": names, "in_flow": flow_in, "out_flow": flow_out, "total_flow": flow_in + flow_out}).sort_values("total_flow", ascending=False).to_csv(str(base) + "_desc-ndteFlow.tsv", sep="\t", index=False, float_format="%.6g")
+        pd.DataFrame({"region": names_full, "in_flow": nodes.expand_vec(flow_in), "out_flow": nodes.expand_vec(flow_out),
+                      "total_flow": nodes.expand_vec(flow_in + flow_out)}).sort_values("total_flow", ascending=False).to_csv(str(base) + "_desc-ndteFlow.tsv", sep="\t", index=False, float_format="%.6g")
         summary["groups"][g] = {"n": len(rs), "top_regions": [names[i] for i in np.argsort(-(flow_in + flow_out))[:10]]}
     save_json(out_dir / f"ndte_summary_atlas-{aslug}.json", summary)
     return summary

@@ -81,6 +81,20 @@ Linear estimators: `model.linear.method: gradient | whittle | gec`; `model.tau_t
 Schaefer+Tian atlases are in `maps/` (see `maps/README.md`; `scripts/make_parcel_map.py` builds others); the
 `file` path is relative to the working directory; parcels marked `n/a` stay at `a0`.
 
+## Missing parcels (`nodes`)
+
+Parcels without valid time series (NaN or constant columns: HALFpipe coverage below its threshold, parcels
+outside the field of view) are removed from the modelled system.  `nodes.auto` (default true) drops every
+parcel that is invalid in a participant; with `nodes.min_coverage` below 1 a parcel is kept when it is valid in
+at least that fraction of participants and the participants lacking it are excluded from the fit instead.
+`nodes.exclude` lists parcel names or label ids that are always dropped.  Time series, SC (normalised after
+the reduction), parcel maps (z-scored on the kept parcels) and the atlas are reduced before any filtering or
+fitting; every saved matrix and node vector is expanded back to the full atlas with NaN rows/columns, so the
+outputs stay aligned with the parcellation (brain renderings show dropped parcels as missing).
+`atlas-<atlas>_desc-nodes.tsv` lists every parcel with `kept`, `reason` and `coverage`; the fit summary records
+the node set and excluded participants.  A parcel with invalid data that is not excluded stops the fit with a
+message naming it.
+
 ## NDTE and particle swarm
 
 `model.ndte`: `enabled` (empirical NDTE per participant and `ndte_corr` fit metric), `max_lag` (10),

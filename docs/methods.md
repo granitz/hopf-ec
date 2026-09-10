@@ -121,6 +121,17 @@ of the parameter search that turns out unstable is replaced by the validated gri
 `a0 = -0.1` leaves room for `beta * z_j` (z-scored maps span roughly +-2) before any node turns supercritical.  One map per run in
 this version; several maps can be compared across runs (`fit_summary_*.json` records the map).
 
+## Missing parcels
+
+A parcel without usable data cannot be a node of the model: its coupling would shape the dynamics of every
+other node while nothing constrains it.  The pipeline therefore fits the system of the parcels that have
+valid time series in all participants (a common node set, so that participant ECs are estimates in the same
+system and the hierarchical group-first fit and the group comparisons remain meaningful); SC normalisation and
+the z-scoring of heterogeneity maps are done on the kept parcels.  Outputs are written on the full atlas with
+NaN for the dropped parcels (`*_desc-nodes.tsv` documents the node set).  The alternative of keeping the
+parcel as an uncoupled node was rejected: its frequency and bifurcation parameter would be undefined and its
+simulated FC a fiction reported as numbers.
+
 ## Normalised directed transfer entropy (NDTE)
 
 `hopfec ndte` computes, per participant (runs concatenated) and per group, the NDTE of Deco, Vidaurre &

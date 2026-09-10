@@ -17,6 +17,7 @@ import pandas as pd
 from joblib import Parallel, delayed
 
 from .atlases import Atlas
+from .nodes import NodeSet, determine_node_set, scan_node_validity
 from .config import cfg_get
 from .inputs.common import TimeseriesFile
 from .inputs.halfpipe import find_halfpipe_timeseries
@@ -96,8 +97,9 @@ def find_subject_timeseries(cfg: dict, sub: str, atlas: Atlas) -> list[Timeserie
     return files
 
 
-def load_subject_empirical(files: list[TimeseriesFile], cfg: dict, n_expected: int, tr_override: float | None = None) -> dict:
-    """Empirical statistics of one participant averaged over runs."""
+def load_subject_empirical(files: list[TimeseriesFile], cfg: dict, n_expected: int, tr_override: float | None = None,
+                           nodes: NodeSet | None = None) -> dict:
+    """Empirical statistics of one participant averaged over runs (on the model node set when ``nodes`` is given)."""
     band = cfg_get(cfg, "model.filter_band", [0.008, 0.08])
     freq_band = cfg_get(cfg, "model.freq_band") or band
     pre_cfg = cfg_get(cfg, "input.prefiltered_band", "auto")
@@ -110,7 +112,6 @@ def load_subject_empirical(files: list[TimeseriesFile], cfg: dict, n_expected: i
     fcs, covs, specs, fcds, metas, nvols, trs, used = [], [], [], [], [], [], [], []
     covs_multi: list[list[np.ndarray]] = []
     filtered_runs: list[np.ndarray] = []
-    bad_nodes: set[int] = set()
     for f in files:
         X, _names = load_timeseries(f.path, n_expected)
         tr = tr_override or f.tr or cfg_get(cfg, "input.tr")
@@ -118,10 +119,14 @@ def load_subject_empirical(files: list[TimeseriesFile], cfg: dict, n_expected: i
             raise ValueError(f"{f.path.name}: repetition time unknown; set input.tr")
         if X.shape[1] != n_expected:
             raise ValueError(f"{f.path.name}: {X.shape[1]} columns but the atlas has {n_expected} parcels")
+        if nodes is not None:
+            X = nodes.reduce_ts(X)
         nan_cols = np.where(~np.isfinite(X).all(axis=0) | (np.nanstd(X, axis=0) == 0))[0]
         if len(nan_cols):
-            bad_nodes.update(int(c) for c in nan_cols)
-            X = np.nan_to_num(X)
+            nm = nodes.kept_names if nodes is not None else None
+            bad = [nm[c] if nm else str(c) for c in nan_cols]
+            raise ValueError(f"{f.path.name}: {len(nan_cols)} parcel(s) without valid data (NaN or constant: {', '.join(bad[:8])}"
+                             f"{'...' if len(bad) > 8 else ''}); exclude them from the model (nodes.auto / nodes.exclude) or drop the participant")
         # band already applied by the time-series stage (sidecar "band") or declared in the config -> filter only once
         pre = None
         if pre_cfg == "auto":
@@ -168,7 +173,7 @@ def load_subject_empirical(files: list[TimeseriesFile], cfg: dict, n_expected: i
     return {"FC": np.mean(fcs, 0), "COVtau": np.mean(covs, 0), "f_peak": f_peak, "spectrum": (freqs, P),
             "NDTE": ndte_emp, "ndte_max_lag": int(ncfg.get("max_lag", 10)),
             "fcd": np.concatenate(fcds), "metastability": float(np.mean(metas)), "n_volumes": int(np.mean(nvols)),
-            "tr": trs[0], "n_runs": len(fcs), "files": used, "bad_nodes": sorted(bad_nodes), "halves": halves,
+            "tr": trs[0], "n_runs": len(fcs), "files": used, "halves": halves,
             "filtered_runs": filtered_runs, "taus": taus,
             "COVtaus": [np.mean([c[k] for c in covs_multi], 0) for k in range(len(taus))] if covs_multi else [np.mean(covs, 0)]}
 
@@ -469,13 +474,25 @@ def fit_one(model: str, emp: dict, SC: np.ndarray, G: float, a, cfg: dict, atlas
     return out
 
 
-def save_fit(res: dict, base: Path, names: list[str], SC: np.ndarray | None, title: str) -> dict:
+NODE_VECTOR_KEYS = ("omega_fit", "f_peak", "a", "a_fit")   # per-node entries of the fit JSON (expanded to the atlas)
+
+
+def save_fit(res: dict, base: Path, names: list[str], SC: np.ndarray | None, title: str, nodes: NodeSet | None = None) -> dict:
+    """Write EC / normalised EC / model FC (rows and columns of the full atlas, NaN for dropped parcels) + JSON + figures."""
     ensure_dir(base.parent)
-    save_matrix(Path(str(base) + "_desc-EC_connectivity.tsv"), res["EC"], names)
-    save_matrix(Path(str(base) + "_desc-ECnorm_connectivity.tsv"), res["EC_norm"], names)
+    ex = nodes.expand if nodes is not None else (lambda M: M)
+    hdr = nodes.names if nodes is not None else names
+    save_matrix(Path(str(base) + "_desc-EC_connectivity.tsv"), ex(res["EC"]), hdr)
+    save_matrix(Path(str(base) + "_desc-ECnorm_connectivity.tsv"), ex(res["EC_norm"]), hdr)
     if res.get("FC_sim") is not None:
-        save_matrix(Path(str(base) + "_desc-modelFC_connectivity.tsv"), res["FC_sim"], names)
+        save_matrix(Path(str(base) + "_desc-modelFC_connectivity.tsv"), ex(res["FC_sim"]), hdr)
     meta = {k: v for k, v in res.items() if k not in ("EC", "EC_norm", "FC_sim", "COVtau_sim", "history", "mask")}
+    if nodes is not None and not nodes.complete:
+        for k in NODE_VECTOR_KEYS:
+            v = meta.get(k)
+            if isinstance(v, (list, tuple, np.ndarray)) and len(v) == nodes.n_kept:
+                meta[k] = nodes.expand_vec(np.asarray(v, float)).tolist()
+        meta["n_model_nodes"] = nodes.n_kept
     meta["files"] = {"EC": str(base) + "_desc-EC_connectivity.tsv", "EC_norm": str(base) + "_desc-ECnorm_connectivity.tsv"}
     save_json(Path(str(base) + "_desc-fit.json"), meta)
     if res.get("history"):
@@ -491,7 +508,7 @@ def save_fit(res: dict, base: Path, names: list[str], SC: np.ndarray | None, tit
 
 def _fit_participant_job(model: str, sub: Subject, G: float, a, cfg: dict, atlas: Atlas, base: Path, C_init: np.ndarray | None, title: str,
                          omega_init: np.ndarray | None = None, C_prior: np.ndarray | None = None, lambda_prior: float | None = None,
-                         cross_validate: bool = False) -> dict:
+                         cross_validate: bool = False, nodes: NodeSet | None = None) -> dict:
     res = fit_one(model, sub.emp, sub.SC, G, a, cfg, atlas, C_init=C_init, omega_override=omega_init, C_prior=C_prior, lambda_prior=lambda_prior)
     if cross_validate and model == "linear":
         cv = _fit_eval_halves(model, sub, G, a, cfg, atlas, C_prior if C_prior is not None else C_init, lambda_prior, omega_init=omega_init)
@@ -502,7 +519,7 @@ def _fit_participant_job(model: str, sub: Subject, G: float, a, cfg: dict, atlas
             res["cross_validation"] = "not possible (single short run)"
     res["FC_emp"], res["COVtau_emp"] = sub.emp["FC"], sub.emp["COVtau"]
     res["participant_id"], res["group"], res["sc_source"] = sub.sub, sub.group, sub.sc_source
-    meta = save_fit(res, base, atlas.region_names, sub.SC, title)
+    meta = save_fit(res, base, atlas.region_names, sub.SC, title, nodes=nodes)
     row = {"participant_id": sub.sub, "group": sub.group, "model": model, "method": res.get("method"), "G": res.get("G_used", res["G_search"]),
            "G_eff": res["G_eff"], "n_volumes": sub.emp["n_volumes"], "n_runs": sub.emp.get("n_runs"), "elapsed_s": res["elapsed_s"],
            "lambda_prior": res.get("lambda_prior"), **res["metrics"]}
@@ -576,9 +593,8 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
     m = _model_cfg(cfg)
     models = models or [k for k in ("linear", "nonlinear") if cfg_get(cfg, f"model.{k}.enabled", True)]
     aslug = slug(atlas.name)
-    N = atlas.n_parcels
-    names = atlas.region_names
-    summary: dict = {"atlas": atlas.name, "n_parcels": N, "models": models, "participants": {}, "groups": {}}
+    N_full = atlas.n_parcels
+    summary: dict = {"atlas": atlas.name, "n_parcels": N_full, "models": models, "participants": {}, "groups": {}}
     # ---- empirical statistics per participant (parallel)
     subs = [Subject(sub=r["participant_id"], group=r.get("group")) for _, r in participants.iterrows()]
     for s in subs:
@@ -587,27 +603,44 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
             s.errors.append("no time series found")
     ok = [s for s in subs if not s.errors]
     LOG.info("fit stage: %d participants with time series (%d without), models %s", len(ok), len(subs) - len(ok), models)
-    emps = Parallel(n_jobs=n_jobs)(delayed(_safe_emp)(s.files, cfg, N) for s in ok)
+    # ---- model node set: parcels with valid data (common to the cohort); everything below runs on the reduced system
+    valid = Parallel(n_jobs=n_jobs)(delayed(scan_node_validity)(s.files, N_full) for s in ok)
+    nodes = determine_node_set({s.sub: v for s, v in zip(ok, valid)}, atlas, cfg.get("nodes") or {})
+    for s in ok:
+        if s.sub in nodes.excluded_participants:
+            s.errors.append(f"no valid data on model node(s) {nodes.excluded_participants[s.sub][:5]}")
+    ok = [s for s in subs if not s.errors]
+    nodes.table().to_csv(out_dir / f"atlas-{aslug}_desc-nodes.tsv", sep="\t", index=False, float_format="%.4g")
+    summary["nodes"] = nodes.summary()
+    summary["n_model_nodes"] = nodes.n_kept
+    atlas_full, atlas = atlas, nodes.subset_atlas(atlas)   # the model sees the kept parcels only
+    N = atlas.n_parcels
+    names = atlas.region_names
+
+    def savem(path, M):  # matrices of the model -> full atlas (NaN rows/columns for dropped parcels)
+        return save_matrix(path, nodes.expand(M), nodes.names)
+
+    emps = Parallel(n_jobs=n_jobs)(delayed(_safe_emp)(s.files, cfg, N_full, nodes) for s in ok)
     for s, e in zip(ok, emps):
         if isinstance(e, Exception):
             s.errors.append(f"empirical: {e}")
         else:
             s.emp = e
             base = ensure_dir(out_dir / s.sub / "func") / f"{s.sub}_atlas-{aslug}"
-            save_matrix(Path(str(base) + "_desc-empiricalFC_connectivity.tsv"), e["FC"], names)
-            save_matrix(Path(str(base) + "_desc-empiricalCOVtau_connectivity.tsv"), e["COVtau"], names)
+            savem(Path(str(base) + "_desc-empiricalFC_connectivity.tsv"), e["FC"])
+            savem(Path(str(base) + "_desc-empiricalCOVtau_connectivity.tsv"), e["COVtau"])
             save_json(Path(str(base) + "_desc-empirical.json"), {k: v for k, v in e.items() if k not in ("FC", "COVtau", "spectrum", "fcd")})
     ok = [s for s in subs if not s.errors and s.emp is not None]
     # ---- structural connectivity
     for s in ok:
-        raw, src = find_subject_sc(cfg, s.sub, atlas)
+        raw, src = find_subject_sc(cfg, s.sub, atlas_full)
         if raw is None:
             s.errors.append("no structural connectivity (run `hopfec sc ...` or set sc.file)")
             continue
-        if raw.shape != (N, N):
-            s.errors.append(f"SC shape {raw.shape} != atlas ({N})")
+        if raw.shape != (N_full, N_full):
+            s.errors.append(f"SC shape {raw.shape} != atlas ({N_full})")
             continue
-        s.SC = prepare_sc(raw, cfg.get("sc", {}))
+        s.SC = prepare_sc(nodes.reduce_mat(raw), cfg.get("sc", {}))   # normalised after dropping parcels
         s.sc_source = src
     ok = [s for s in subs if not s.errors and s.SC is not None]
     if not ok:
@@ -619,7 +652,7 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
     groups = sorted(set(s.group for s in ok if s.group))
     emp_all = group_empirical(ok, freq_band, smooth)
     SC_group = prepare_sc(np.mean([s.SC for s in ok], 0), {**cfg.get("sc", {}), "symmetrize": False})
-    save_matrix(out_dir / "sc" / f"group-all_atlas-{aslug}_desc-modelSC_connectivity.tsv", SC_group, names)
+    savem(out_dir / "sc" / f"group-all_atlas-{aslug}_desc-modelSC_connectivity.tsv", SC_group)
     a_cfg = m.get("a", -0.02)
     a = np.asarray(a_cfg, float) if isinstance(a_cfg, (list, tuple)) else float(a_cfg)
     hcfg = m.get("heterogeneity", {}) or {}
@@ -630,7 +663,7 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
         pmap = load_parcel_map({**hcfg["map"], "zscore": hcfg.get("zscore", True)}, atlas)
         a0h = float(hcfg.get("a0") if hcfg.get("a0") is not None else HETERO_A0_DEFAULT)
         hetero = {"z": pmap.z, "a0": a0h, "clip": tuple(hcfg.get("clip") or (-0.9, 0.9)), "beta_values": linspace_spec(hcfg.get("beta", {"start": -0.05, "stop": 0.05, "num": 11})), "map": pmap}
-        save_matrix(out_dir / "sc" / f"atlas-{aslug}_desc-map{slug(pmap.name)}_values.tsv", np.c_[pmap.values, pmap.z], ["value", "z"])
+        save_matrix(out_dir / "sc" / f"atlas-{aslug}_desc-map{slug(pmap.name)}_values.tsv", nodes.expand_rows(np.c_[pmap.values, pmap.z]), ["value", "z"])
         summary["heterogeneity"] = {"map": pmap.name, "source": pmap.source, "n_missing": pmap.n_missing, "a0": a0h}
         LOG.info("heterogeneous bifurcation parameter from map %s (%s): a_j = %.3g + beta * z_j", pmap.name, pmap.source, a0h)
     linear_results: dict[str, dict] = {}          # sub -> {"EC", "omega"} from the linear model
@@ -649,14 +682,16 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
                 if hetero and best_group.get("a_vector") is not None:
                     a = np.asarray(best_group["a_vector"], float)
                     pmap = hetero["map"]
-                    save_matrix(mdir / f"group-all_atlas-{aslug}_model-{tag}_desc-heterogeneity_a.tsv", np.c_[pmap.z, a], ["z", "a_j"])
+                    save_matrix(mdir / f"group-all_atlas-{aslug}_model-{tag}_desc-heterogeneity_a.tsv", nodes.expand_rows(np.c_[pmap.z, a]), ["z", "a_j"])
                     save_json(mdir / f"group-all_atlas-{aslug}_model-{tag}_desc-heterogeneity.json", {"map": pmap.name, "source": pmap.source, "a0": hetero["a0"], "beta": best_group["beta"], "G": best_group["G"],
                               "a_min": float(a.min()), "a_max": float(a.max()), "n_supercritical": int(np.sum(a > 0)), "metric": best_group.get("metric"), "value": best_group.get(best_group.get("metric", "fit_rmse"))})
                     summary["heterogeneity"].update({model: {"beta": best_group["beta"], "G": best_group["G"], "a_range": [float(a.min()), float(a.max())]}})
                 elif best_group.get("a") is not None and cfg_get(cfg, "model.search.a") is not None:
                     a = float(best_group["a"])
         G_group = float(G_fixed) if G_fixed is not None else (float(best_group["G"]) if best_group else 1.0)
-        summary.setdefault("search", {})[model] = {"G_group": G_group, "a": a if np.isscalar(a) else list(a), "best": best_group}
+        summary.setdefault("search", {})[model] = {"G_group": G_group, "a": a if np.isscalar(a) else nodes.expand_vec(np.asarray(a, float)).tolist(),
+                                                   "best": ({**best_group, "a_vector": nodes.expand_vec(np.asarray(best_group["a_vector"], float)).tolist()}
+                                                            if best_group and best_group.get("a_vector") is not None else best_group)}
         # ---- group sets (needed early for hierarchical fitting)
         gcfg = cfg.get("group", {})
         group_sets = {"all": ok} if gcfg.get("pooled", True) else {}
@@ -710,7 +745,7 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
                     om_init = priors[key].get("omega") if key in priors else None
                     lam_s = lam_group
                 base = mdir / s.sub / f"{s.sub}_atlas-{aslug}_model-{tag}"
-                jobs.append(delayed(_fit_participant_job)(model, s, G_s, a, cfg, atlas, base, C_init, f"{s.sub} {model} Hopf", om_init, C_prior_s, lam_s, cross_validate))
+                jobs.append(delayed(_fit_participant_job)(model, s, G_s, a, cfg, atlas, base, C_init, f"{s.sub} {model} Hopf", om_init, C_prior_s, lam_s, cross_validate, nodes))
             results = Parallel(n_jobs=n_jobs)(jobs)
             for r in results:
                 rows.append(r["row"])
@@ -722,14 +757,14 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
             for s in ok:
                 p = mdir / s.sub / f"{s.sub}_atlas-{aslug}_model-{tag}_desc-EC_connectivity.tsv"
                 if p.exists():
-                    ECs[s.sub] = load_matrix(p)
+                    ECs[s.sub] = nodes.reduce_mat(load_matrix(p))
                     pn = p.with_name(p.name.replace("_desc-EC_", "_desc-ECnorm_"))
-                    ECns[s.sub] = load_matrix(pn) if pn.exists() else ECs[s.sub] / max(ECs[s.sub].max(), 1e-12) * float(cfg_get(cfg, "sc.sc_max", 0.2))
+                    ECns[s.sub] = nodes.reduce_mat(load_matrix(pn)) if pn.exists() else ECs[s.sub] / max(ECs[s.sub].max(), 1e-12) * float(cfg_get(cfg, "sc.sc_max", 0.2))
                     fj = p.with_name(p.name.replace("_desc-EC_connectivity.tsv", "_desc-fit.json"))
                     meta = json.loads(fj.read_text()) if fj.exists() else {}
                     rows.append({"participant_id": s.sub, "group": s.group, "model": model, **meta.get("metrics", {})})
                     if model == "linear":
-                        linear_results[s.sub] = {"EC": ECs[s.sub], "omega": np.asarray(meta["omega_fit"], float) if meta.get("omega_fit") else None}
+                        linear_results[s.sub] = {"EC": ECs[s.sub], "omega": nodes.reduce_vec(np.asarray(meta["omega_fit"], float)) if meta.get("omega_fit") else None}
         if rows:
             pd.DataFrame(rows).to_csv(mdir / f"participants_atlas-{aslug}_model-{tag}_fit.tsv", sep="\t", index=False, float_format="%.6g")
         # ---- group-level
@@ -741,8 +776,8 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
             ensure_dir(gbase.parent)
             emp_g = group_emp[gname]
             SC_g = group_SC[gname]
-            save_matrix(Path(str(gbase) + "_desc-empiricalFC_connectivity.tsv"), emp_g["FC"], names)
-            save_matrix(Path(str(gbase) + "_desc-empiricalCOVtau_connectivity.tsv"), emp_g["COVtau"], names)
+            savem(Path(str(gbase) + "_desc-empiricalFC_connectivity.tsv"), emp_g["FC"])
+            savem(Path(str(gbase) + "_desc-empiricalCOVtau_connectivity.tsv"), emp_g["COVtau"])
             entry: dict = {"n": len(members), "members": [s.sub for s in members]}
             if gcfg.get("fit_group_average", True):
                 use_lin = model == "nonlinear" and cfg_get(cfg, "model.nonlinear.init", "linear") == "linear" and gname in linear_group_results
@@ -751,7 +786,7 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
                 res = group_fit_results.get(gname) or fit_one(model, emp_g, SC_g, G_group, a, cfg, atlas, C_init=C_init, verbose=verbose, omega_override=om_init)
                 res["FC_emp"], res["COVtau_emp"] = emp_g["FC"], emp_g["COVtau"]
                 res["group"] = gname
-                meta = save_fit(res, gbase, names, SC_g, f"group {gname} {model} Hopf (fit to group-average statistics)")
+                meta = save_fit(res, gbase, names, SC_g, f"group {gname} {model} Hopf (fit to group-average statistics)", nodes=nodes)
                 entry["fit"] = {k: meta[k] for k in ("metrics", "G_eff", "elapsed_s", "method") if k in meta}
                 grows.append({"group": gname, "n": len(members), "model": model, "kind": "fit_to_average", "G_eff": res["G_eff"], **res["metrics"]})
                 if model == "linear":
@@ -760,10 +795,10 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
             mem_ecn = [ECns[s.sub] for s in members if s.sub in ECns]
             if gcfg.get("mean_of_participants", True) and mem_ecs:
                 meanEC = np.mean(mem_ecs, 0)
-                save_matrix(Path(str(gbase) + "_desc-meanEC_connectivity.tsv"), meanEC, names)
-                save_matrix(Path(str(gbase) + "_desc-sdEC_connectivity.tsv"), np.std(mem_ecs, 0), names)
-                save_matrix(Path(str(gbase) + "_desc-meanECnorm_connectivity.tsv"), np.mean(mem_ecn, 0), names)
-                save_matrix(Path(str(gbase) + "_desc-sdECnorm_connectivity.tsv"), np.std(mem_ecn, 0), names)
+                savem(Path(str(gbase) + "_desc-meanEC_connectivity.tsv"), meanEC)
+                savem(Path(str(gbase) + "_desc-sdEC_connectivity.tsv"), np.std(mem_ecs, 0))
+                savem(Path(str(gbase) + "_desc-meanECnorm_connectivity.tsv"), np.mean(mem_ecn, 0))
+                savem(Path(str(gbase) + "_desc-sdECnorm_connectivity.tsv"), np.std(mem_ecn, 0))
                 try:
                     plot_ec_summary(meanEC, SC_g, Path(str(gbase) + "_desc-meanEC.png"), f"group {gname}: mean of {len(mem_ecs)} participant ECs ({model})", names)
                 except Exception as e:  # noqa: BLE001
@@ -790,9 +825,9 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
                         continue
                     c = compare_groups(A, B, mask_any, q=float(gcfg.get("fdr_q", 0.05)), n_perm=int(gcfg.get("n_perm", 0)))
                     cb = comp_dir / f"group-{slug(ga)}_vs_group-{slug(gb)}_atlas-{aslug}_model-{tag}"
-                    save_matrix(Path(str(cb) + "_desc-tstat_connectivity.tsv"), c["t"], names)
-                    save_matrix(Path(str(cb) + "_desc-pvalue_connectivity.tsv"), c["p"], names)
-                    save_matrix(Path(str(cb) + "_desc-sigFDR_connectivity.tsv"), c["sig_fdr"].astype(int), names)
+                    savem(Path(str(cb) + "_desc-tstat_connectivity.tsv"), c["t"])
+                    savem(Path(str(cb) + "_desc-pvalue_connectivity.tsv"), c["p"])
+                    savem(Path(str(cb) + "_desc-sigFDR_connectivity.tsv"), c["sig_fdr"].astype(int))
                     save_json(Path(str(cb) + "_desc-comparison.json"), {"compared_matrix": compare_on, **{k: v for k, v in c.items() if k in ("n_a", "n_b", "n_sig_edges", "q", "global", "n_sig_perm_fwe")}})
                     try:
                         plot_group_comparison(c["mean_a"], c["mean_b"], c["t"], c["sig_fdr"], (ga, gb), Path(str(cb) + "_desc-comparison.png"))
@@ -803,8 +838,8 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
     return summary
 
 
-def _safe_emp(files, cfg, N):
+def _safe_emp(files, cfg, N, nodes=None):
     try:
-        return load_subject_empirical(files, cfg, N)
+        return load_subject_empirical(files, cfg, N, nodes=nodes)
     except Exception as e:  # noqa: BLE001
         return e

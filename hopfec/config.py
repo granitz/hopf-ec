@@ -217,6 +217,9 @@ DEFAULTS: dict[str, Any] = {
               "cv_max_participants": 8,   # participants used to choose lambda_group by cross-validation
               "cv_max_iter": 200,
               "cv_max_extensions": 2},    # extend the lambda grid upwards when the optimum is its largest value
+    "nodes": {"auto": True,            # drop parcels without valid time series (NaN / constant, e.g. low coverage) from the model
+              "exclude": [],           # parcel names or label ids always dropped
+              "min_coverage": 1.0},    # keep a parcel valid in >= this fraction of participants (others are excluded from the fit)
     "compute": {"n_jobs": -1, "backend": "loky", "threads_per_job": 1},
     "stages": ["timeseries", "sc", "fit"],
 }

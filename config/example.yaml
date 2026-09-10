@@ -122,6 +122,11 @@ group:
   fdr_q: 0.05
   n_perm: 0                         # >0 adds a permutation (max-statistic FWE) test
 
+nodes:                              # parcels without valid time series (NaN / constant, e.g. HALFpipe coverage < threshold)
+  auto: true                        # drop them from the model (outputs stay on the full atlas, NaN rows/columns)
+  exclude: []                       # parcel names or label ids always dropped
+  min_coverage: 1.0                 # keep a parcel valid in >= this fraction of participants; others are excluded from the fit
+
 compute:
   n_jobs: -1                        # joblib workers (-1 = all cores)
   threads_per_job: 1
