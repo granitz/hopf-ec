@@ -24,8 +24,12 @@ def fit_nonlinear_surrogate(FC_emp: np.ndarray, COVtau_emp: np.ndarray, C0: np.n
                             mask: np.ndarray, G: float, a, omega: np.ndarray, tr: float, tau_tr: int = 1, beta: float = 0.02,
                             band=None, filter_consistent: bool = True, max_iter: int = 200, patience: int = 15,
                             step_frac: float = 0.05, step_max: float = 0.25, step_min: float = 1e-4, normalize_max: float | None = 0.2,
-                            w_fc: float = 1.0, w_tau: float = 1.0, verbose: int = 0, log_every: int = 10) -> GECResult:
-    """moments_fn(C) -> (FC_sim, COVtau_sim) of the non-linear model at coupling G*C (deterministic seed)."""
+                            w_fc: float = 1.0, w_tau: float = 1.0, verbose: int = 0, log_every: int = 10,
+                            tol_rel: float = 1e-4) -> GECResult:
+    """moments_fn(C) -> (FC_sim, COVtau_sim) of the non-linear model at coupling G*C (deterministic seed).
+
+    Stops when `patience` iterations bring no new best, when the step size is exhausted, or when the relative
+    improvement of the error over the last `patience` iterations falls below `tol_rel` (converged)."""
     t0 = time.time()
     N = C0.shape[0]
     a_vec = np.broadcast_to(np.asarray(a, float), (N,))
@@ -39,6 +43,8 @@ def fit_nonlinear_surrogate(FC_emp: np.ndarray, COVtau_emp: np.ndarray, C0: np.n
     stall = 0
     n_rej = 0
     it = 0
+    err_trace = [err]           # accepted error after every iteration (for the relative-improvement stop)
+    converged_rel = False
     while it < int(max_iter):
         # surrogate gradient of the non-linear residual through the linear Jacobian at W = G*C
         A = build_jacobian(G * C, 1.0, a_vec, omega)
@@ -59,7 +65,7 @@ def fit_nonlinear_surrogate(FC_emp: np.ndarray, COVtau_emp: np.ndarray, C0: np.n
         m_new = fit_error(FC_emp, FC_new, COVtau_emp, COV_new)
         it += 1
         if np.isfinite(m_new["fit_rmse"]) and m_new["fit_rmse"] < err:
-            C, FC_sim, COV_sim, err = C_new, FC_new, COV_new, m_new["fit_rmse"]
+            C, FC_sim, COV_sim, err, m = C_new, FC_new, COV_new, m_new["fit_rmse"], m_new
             step_frac = min(step_frac * 1.3, step_max)
             history.append({**m_new, "iter": it, "step_frac": step_frac, "C_sum": float(C.sum())})
             if err < best_err - 1e-12:
@@ -71,16 +77,21 @@ def fit_nonlinear_surrogate(FC_emp: np.ndarray, COVtau_emp: np.ndarray, C0: np.n
             n_rej += 1
             step_frac *= 0.5
             stall += 1
-            history.append({**m, "iter": it, "step_frac": step_frac, "C_sum": float(C.sum()), "rejected": 1})
+            history.append({**m, "iter": it, "step_frac": step_frac, "C_sum": float(C.sum()), "rejected": 1})  # current (accepted) error
             if step_frac < step_min:
                 LOG.info("surrogate fit: step size exhausted after %d iterations (%d rejected)", it, n_rej)
                 break
+        err_trace.append(err)
+        if tol_rel > 0 and it >= int(patience) and (err_trace[-1 - int(patience)] - err) < tol_rel * err:
+            converged_rel = True
+            LOG.info("surrogate fit: relative improvement over the last %d iterations < %g after %d iterations", int(patience), tol_rel, it)
+            break
         if verbose and it % log_every == 0:
             LOG.info("surrogate it %4d  fit_rmse=%.4f  fc_corr=%.3f  step=%.3g  rejected=%d", it, err, history[-1]["fc_corr"], step_frac, n_rej)
         if stall >= patience:
             break
-    res = GECResult(C=best_C, G=G, history=history, best_iter=best_it, n_iter=len(history), converged=(step_frac < step_min or stall >= patience),
-                    elapsed_s=time.time() - t0)
+    res = GECResult(C=best_C, G=G, history=history, best_iter=best_it, n_iter=len(history),
+                    converged=(step_frac < step_min or stall >= patience or converged_rel), elapsed_s=time.time() - t0)
     res.FC_sim, res.COVtau_sim = best_mom
     res.metrics = fit_error(FC_emp, res.FC_sim, COVtau_emp, res.COVtau_sim)
     res.metrics["initial_fit_rmse"] = history[0]["fit_rmse"]

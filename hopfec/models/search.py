@@ -47,20 +47,34 @@ SEARCH_DEFAULTS = {
 }
 
 
+def linear_validity(SC, G, a, omega, require_subcritical: bool = True) -> tuple[bool, str]:
+    """Validity of a linear-model point.  Default: every node below its bifurcation (a_j < 0), the regime in which
+    the linearisation of the Hopf model is meaningful; with require_subcritical=False only the stability of the
+    coupled Jacobian is required (a node with a_j > 0 can be held stable by its coupling)."""
+    a_vec = np.broadcast_to(np.asarray(a, float), (np.asarray(SC).shape[0],))
+    if require_subcritical and np.any(a_vec >= 0):
+        return False, (f"{int(np.sum(a_vec >= 0))} supercritical node(s) (a_j >= 0): the linear model is used below the bifurcation only "
+                       "(model.linear.require_subcritical)")
+    st = linear_stability(SC, G, a, omega)
+    if not st["stable"]:
+        return False, f"unstable linearisation (max Re eig {st['max_real_eig']:.3g} >= 0; needs a_j < G*sum_k C_jk)"
+    return True, ""
+
+
 # --------------------------------------------------------------------------- single point
 def _eval_point(model: str, G: float, a, SC, omega, emp: dict, tr: float, band, tau_tr: int, beta: float, dt: float,
                 n_sim: int, seed: int, transient_s: float, filter_consistent: bool, need_fcd: bool, fcd_cfg: dict,
-                use_numba, a_fn=None) -> dict:
+                use_numba, a_fn=None, require_subcritical: bool = True) -> dict:
     FC_emp, COV_emp = emp["FC"], emp["COVtau"]
     out = {"G": float(G), "a": float(a) if np.isscalar(a) else float(np.mean(a)), "valid": True, "reason": ""}
     if a_fn is not None and np.isscalar(a):
         a = a_fn(float(a))  # heterogeneity: axis value (e.g. beta) -> node vector a_j
     if model == "linear":
-        st = linear_stability(SC, G, a, omega)
-        if not st["stable"]:
+        ok, reason = linear_validity(SC, G, a, omega, require_subcritical)
+        if not ok:
             out.update(_NAN_METRICS)
             out["valid"] = False
-            out["reason"] = f"unstable linearisation (max Re eig {st['max_real_eig']:.3g} >= 0; needs a_j < G*sum_k C_jk)"
+            out["reason"] = reason
             return out
     need_ndte = "NDTE" in emp and emp["NDTE"] is not None
     if model == "linear" and not need_fcd:
@@ -110,12 +124,12 @@ def _finalize(df: pd.DataFrame, metric: str) -> pd.DataFrame:
 
 def evaluate_points(model: str, points: Sequence[tuple[float, float]], SC, omega, emp, tr, band, tau_tr=1, beta=0.02,
                     dt=0.1, n_sim=1, seed=0, transient_s=100.0, filter_consistent=True, metric="fit_rmse", fcd_cfg=None,
-                    n_jobs=1, use_numba="auto", stage: str = "coarse", a_fn=None) -> pd.DataFrame:
+                    n_jobs=1, use_numba="auto", stage: str = "coarse", a_fn=None, require_subcritical: bool = True) -> pd.DataFrame:
     fcd_cfg = fcd_cfg or {}
     need_fcd = metric in ("fcd_ks", "meta_diff", "combined")
     rows = Parallel(n_jobs=n_jobs, prefer="processes")(
         delayed(_eval_point)(model, G, a, SC, omega, emp, tr, band, tau_tr, beta, dt, n_sim, seed, transient_s,
-                             filter_consistent, need_fcd, fcd_cfg, use_numba, a_fn)
+                             filter_consistent, need_fcd, fcd_cfg, use_numba, a_fn, require_subcritical)
         for G, a in points
     )
     df = pd.DataFrame(rows)
@@ -249,17 +263,17 @@ def parabolic_vertex(x: np.ndarray, y: np.ndarray, i: int, lower_is_better: bool
     return float(xv)
 
 
-def _validated_used(model: str, used: dict, fallback: dict, SC, omega, a_fn, info: dict) -> dict:
+def _validated_used(model: str, used: dict, fallback: dict, SC, omega, a_fn, info: dict, require_subcritical: bool = True) -> dict:
     """The interpolated / continuous optimum is off the evaluated grid: for the linear model make sure its
     linearisation is stable, otherwise fall back to the (validated) grid optimum."""
     if model != "linear" or used.get("source") in ("grid", "refined_grid"):
         return used
     a = a_fn(float(used["a"])) if a_fn is not None else float(used["a"])
-    st = linear_stability(SC, float(used["G"]), a, omega)
-    if st["stable"]:
+    ok, reason = linear_validity(SC, float(used["G"]), a, omega, require_subcritical)
+    if ok:
         return used
-    msg = (f"{used['source']} optimum (G={used['G']:.4g}, a={used['a']:.4g}) has an unstable linearisation "
-           f"(max Re eig {st['max_real_eig']:.3g}); using the grid optimum (G={fallback['G']:.4g}, a={fallback['a']:.4g}) instead")
+    msg = (f"{used['source']} optimum (G={used['G']:.4g}, a={used['a']:.4g}) is invalid ({reason}); "
+           f"using the grid optimum (G={fallback['G']:.4g}, a={fallback['a']:.4g}) instead")
     LOG.warning(msg)
     info["warnings"].append(msg)
     return {"G": float(fallback["G"]), "a": float(fallback["a"]), "source": f"refined_grid ({used['source']} point unstable)"}
@@ -287,7 +301,7 @@ def interpolate_optimum(df: pd.DataFrame, best: dict, metric: str) -> dict:
 def continuous_search(model: str, SC, omega, emp, tr, G0: float, a0: float, band, fit_a: bool, metric: str,
                       bounds_G: tuple[float, float], bounds_a: tuple[float, float], tau_tr=1, beta=0.02, dt=0.1, n_sim=1,
                       seed=0, transient_s=100.0, filter_consistent=True, fcd_cfg=None, method: str = "auto",
-                      max_fev: int = 60, use_numba="auto", a_fn=None, a_grad=None, pso_cfg: dict | None = None) -> dict:
+                      max_fev: int = 60, use_numba="auto", a_fn=None, a_grad=None, pso_cfg: dict | None = None, require_subcritical: bool = True) -> dict:
     """Continuous optimisation of G (and a) starting from the grid optimum.
 
     Linear model + fit_rmse: exact loss/gradient (adjoint) with L-BFGS-B.  Otherwise Powell on the metric
@@ -316,7 +330,7 @@ def continuous_search(model: str, SC, omega, emp, tr, G0: float, a0: float, band
             G = float(x[0])
             a = float(x[1]) if fit_a else a0
             r = _eval_point(model, G, a, SC, omega, emp, tr, band, tau_tr, beta, dt, n_sim, seed, transient_s, filter_consistent,
-                            metric in ("fcd_ks", "meta_diff", "combined"), fcd_cfg or {}, use_numba, a_fn)
+                            metric in ("fcd_ks", "meta_diff", "combined"), fcd_cfg or {}, use_numba, a_fn, require_subcritical)
             if metric == "combined":
                 r["combined"] = (1 - r["fc_corr"]) + r.get("fcd_ks", 0.0)
             v = r.get(metric, np.nan)
@@ -368,7 +382,7 @@ def continuous_search(model: str, SC, omega, emp, tr, G0: float, a0: float, band
             G = float(x[0])
             a = float(x[1]) if fit_a else a0
             r = _eval_point(model, G, a, SC, omega, emp, tr, band, tau_tr, beta, dt, n_sim, seed, transient_s, filter_consistent,
-                            metric in ("fcd_ks", "meta_diff", "combined"), fcd_cfg or {}, use_numba, a_fn)
+                            metric in ("fcd_ks", "meta_diff", "combined"), fcd_cfg or {}, use_numba, a_fn, require_subcritical)
             if metric == "combined":
                 r["combined"] = (1 - r["fc_corr"]) + r.get("fcd_ks", 0.0)
             v = r.get(metric, np.nan)
@@ -394,18 +408,19 @@ def continuous_search(model: str, SC, omega, emp, tr, G0: float, a0: float, band
 def adaptive_search(model: str, SC, omega, emp, tr, G_values, a_values, band, search_cfg: dict | None = None, tau_tr=1,
                     beta=0.02, dt=0.1, n_sim=1, seed=0, transient_s=100.0, filter_consistent=True, metric="fit_rmse",
                     fcd_cfg=None, n_jobs=1, use_numba="auto", default_a=-0.02, a_fn=None, a_grad=None,
-                    a_axis: str = "a") -> tuple[pd.DataFrame, dict, dict]:
+                    a_axis: str = "a", require_subcritical: bool = True) -> tuple[pd.DataFrame, dict, dict]:
     """Grid search + border handling + extension + refinement + interpolation [+ continuous optimisation].
 
     Returns (table of all evaluated points, best point actually to be used, info dict for reporting)."""
     s = {**SEARCH_DEFAULTS, **(search_cfg or {})}
     kw = dict(tau_tr=tau_tr, beta=beta, dt=dt, n_sim=n_sim, seed=seed, transient_s=transient_s, filter_consistent=filter_consistent,
-              metric=metric, fcd_cfg=fcd_cfg, n_jobs=n_jobs, use_numba=use_numba, a_fn=a_fn)
+              metric=metric, fcd_cfg=fcd_cfg, n_jobs=n_jobs, use_numba=use_numba, a_fn=a_fn, require_subcritical=require_subcritical)
     G_vals = np.round(np.array([float(g) for g in G_values]), 10)
     a_grid = a_values is not None and len(a_values) > 0
     a_vals = np.round(np.asarray(a_values, float), 10) if a_grid else np.array([float(default_a)])
     if model == "linear" and a_grid and a_fn is None and np.any(a_vals >= 0):
-        LOG.warning("linear model: grid points with a >= 0 may be unstable and will be marked invalid")
+        LOG.warning("linear model: grid points with a >= 0 are %s", "outside the validity of the linearisation and marked invalid (model.linear.require_subcritical)"
+                    if require_subcritical else "kept only where the coupled Jacobian is stable")
     info_axis = {"a_axis": a_axis}
     if 0.0 in G_vals and not s["allow_zero_G"]:
         LOG.info("G = 0 is on the grid: evaluated for the error surface but never selected (uncoupled model)")
@@ -488,7 +503,7 @@ def adaptive_search(model: str, SC, omega, emp, tr, G_values, a_values, band, se
     if s["interpolate"]:
         interp = interpolate_optimum(df, best, metric)
         if interp["interpolated_axes"]:
-            used = _validated_used(model, {"G": interp["G"], "a": interp["a"], "source": "parabolic_interpolation"}, best_refined, SC, omega, a_fn, info)
+            used = _validated_used(model, {"G": interp["G"], "a": interp["a"], "source": "parabolic_interpolation"}, best_refined, SC, omega, a_fn, info, require_subcritical)
     # ---- continuous optimisation
     cont = None
     if s["continuous"]:
@@ -496,10 +511,10 @@ def adaptive_search(model: str, SC, omega, emp, tr, G_values, a_values, band, se
                                  bounds_G=caps["G"], bounds_a=caps["a"], tau_tr=tau_tr, beta=beta, dt=dt, n_sim=n_sim, seed=seed,
                                  transient_s=transient_s, filter_consistent=filter_consistent, fcd_cfg=fcd_cfg,
                                  method=s["continuous_method"], max_fev=int(s["continuous_max_fev"]), use_numba=use_numba,
-                                 a_fn=a_fn, a_grad=a_grad, pso_cfg={**s.get("pso", {}), "n_jobs": n_jobs})
+                                 a_fn=a_fn, a_grad=a_grad, pso_cfg={**s.get("pso", {}), "n_jobs": n_jobs}, require_subcritical=require_subcritical)
         better = (cont[metric] <= float(best[metric])) if LOWER_IS_BETTER.get(metric, True) else (cont[metric] >= float(best[metric]))
         if np.isfinite(cont[metric]) and (better or cont["success"]):
-            used = _validated_used(model, {"G": cont["G"], "a": cont["a"], "source": f"continuous ({cont['method']})"}, best_refined, SC, omega, a_fn, info)
+            used = _validated_used(model, {"G": cont["G"], "a": cont["a"], "source": f"continuous ({cont['method']})"}, best_refined, SC, omega, a_fn, info, require_subcritical)
         info["continuous"] = cont
     final = dict(best)
     final.update({"G": used["G"], "a": used["a"], "source": used["source"], "G_grid": best_refined["G"], "a_grid": best_refined["a"]})

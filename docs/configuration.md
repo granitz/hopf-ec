@@ -71,6 +71,9 @@ over `model.linear.lambda_grid`; `group.cv_max_participants`, `group.cv_max_iter
 `group.cross_validate` (held-out metrics per participant).  `input.prefiltered_band: auto` reads the band
 already applied by `hopfec timeseries` from the sidecar so the data are not filtered twice.
 Linear estimators: `model.linear.method: gradient | whittle | gec`; `model.tau_tr` may be a list of lags.
+`model.linear.require_subcritical` (default true): a search point with any `a_j >= 0` is invalid; false accepts
+every point whose coupled Jacobian is stable.  `model.nonlinear.init: linear | sc | both` (both: fit from the
+linear EC and from SC, keep the better, report `fit_rmse_init_*`, `ec_corr_between_inits`).
 
 ## Heterogeneity
 

@@ -90,6 +90,7 @@ model:
     enabled: true
     method: gradient                # gradient (FC + lagged corr.) | whittle (cross-spectral likelihood) | gec (heuristic)
     filter_consistent: true
+    require_subcritical: true       # a search point with any a_j >= 0 is invalid (false: stable Jacobian suffices)
     fit_omega: true                 # co-estimate node frequencies (recommended)
     fit_a: none                     # none | global | node
     lambda_sc: 0.0                  # L2 pull towards the structural prior
@@ -104,13 +105,14 @@ model:
     beta: {start: -0.05, stop: 0.05, num: 11}   # replaces search.a as the second search axis
   nonlinear:
     enabled: true
-    init: linear                    # initialise from the linear EC (or: sc)
+    init: linear                    # linear (from the linear EC) | sc (structural prior) | both (fit from each, keep the better, report agreement)
     method: surrogate               # surrogate (recommended) | gec (heuristic, accept-if-improving)
     n_sim: 4                        # raise if the fit reports improvement_below_noise
     eps_fc: 0.0005
     eps_tau: 0.0005
     max_iter: 300
-    patience: 20
+    patience: 20                    # stop after this many iterations without a new best ...
+    tol_rel: 1.0e-4                 # ... or when the error improved by less than this fraction over `patience` iterations
 
 group:
   fit_group_average: true

@@ -57,7 +57,9 @@ within 2 SD of it is flagged (`improvement_below_noise`; raise `n_sim`).  `surro
 back-propagates the non-linear residuals through the linear model's adjoint at the current coupling
 and takes accept-if-improving steps with an adaptive step size — a genuine descent direction for the
 non-linear loss; `gec` is the heuristic above.  The non-linear fit is initialised from the linear EC
-and node frequencies (`init: linear`).
+and node frequencies (`init: linear`), from the structural prior as in the published GEC fits (`init: sc`), or
+from both (`init: both`: the better fit is kept and the metrics report the fit error of each start and the
+correlation / relative difference of the two ECs, so that a dependence on the initialisation is visible).
 
 ### Validation on synthetic ground truth (N = 20, 8 "participants" × 600 volumes, TR 2 s)
 
@@ -165,8 +167,9 @@ surrogate methods and validated against NDTE.
 `fc_rmse`, `tau_rmse`, `fcd_ks` (KS distance of FCD distributions, needs simulation), `meta_diff`,
 `combined`.  `search.level: group | participant | both` chooses whose FC is used.  The search then:
 
-1. **validity guards** - linear-model points whose linearisation is unstable (some `a_j >= G sum_k C_jk`)
-   are marked invalid (NaN); `G = 0` (uncoupled model) is evaluated for the surface but never selected
+1. **validity guards** - linear-model points with a supercritical node (`a_j >= 0`, outside the regime in which
+   the linearisation describes the Hopf model; `model.linear.require_subcritical: false` relaxes this to a
+   stable coupled Jacobian) or an unstable linearisation are marked invalid (NaN); `G = 0` (uncoupled model) is evaluated for the surface but never selected
    (`allow_zero_G`); a selected optimum next to invalid points is flagged `at_validity_limit`;
 2. **border detection + extension** - if the optimum lies on an edge of the grid the axis is extended
    beyond that edge with the same step (`extend_factor` x span, at most `max_extensions` times, within

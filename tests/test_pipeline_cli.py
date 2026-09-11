@@ -63,3 +63,17 @@ def test_cli_fit(tmp_path):
     # group-only re-run works from the saved participant fits
     r2 = subprocess.run([sys.executable, "-m", "hopfec.cli", "fit", "-c", str(tmp_path / "cfg.yaml"), "-q", "--group-only", "--model", "linear"], capture_output=True, text=True, cwd=tmp_path)
     assert r2.returncode == 0, r2.stderr[-2000:]
+
+
+def test_nonlinear_init_both(tmp_path):
+    _make(tmp_path)
+    r = subprocess.run([sys.executable, "-m", "hopfec.cli", "fit", "-c", str(tmp_path / "cfg.yaml"), "-q", "--set", "model.nonlinear.init=both",
+                        "--set", "group.cross_validate=false", "--set", "group.compare=false"], capture_output=True, text=True, cwd=tmp_path)
+    assert r.returncode == 0, r.stderr[-3000:]
+    out = tmp_path / "derivatives" / "hopfec" / "models" / "model-hopf"
+    fit = pd.read_csv(out / "participants_atlas-toydseg_model-hopf_fit.tsv", sep="\t")
+    assert {"init_used", "fit_rmse_init_linear", "fit_rmse_init_sc", "ec_corr_between_inits", "ec_rel_diff_between_inits"} <= set(fit.columns)
+    assert set(fit["init_used"]) <= {"linear", "sc"} and fit["ec_corr_between_inits"].between(-1, 1).all()
+    assert (fit["fit_rmse"] <= fit[["fit_rmse_init_linear", "fit_rmse_init_sc"]].min(axis=1) + 1e-12).all()
+    meta = json.loads((out / "group-all" / "group-all_atlas-toydseg_model-hopf_desc-fit.json").read_text())
+    assert meta["metrics"]["init_used"] in ("linear", "sc") and "fit_rmse_init_sc" in meta["metrics"]

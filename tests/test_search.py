@@ -62,7 +62,9 @@ def test_border_warn_only(truth):
 def test_validity_guard_and_zero_G(truth):
     t = truth
     df = evaluate_points("linear", [(0.0, -0.05), (0.5, -0.05), (0.5, 0.3)], t["SC"], t["omega"], t["emp"], t["tr"], t["band"])
-    assert bool(df.loc[2, "valid"]) is False and np.isnan(df.loc[2, "fit_rmse"]) and "unstable" in df.loc[2, "reason"]
+    assert bool(df.loc[2, "valid"]) is False and np.isnan(df.loc[2, "fit_rmse"]) and "supercritical" in df.loc[2, "reason"]
+    df_j = evaluate_points("linear", [(0.5, 0.3)], t["SC"], t["omega"], t["emp"], t["tr"], t["band"], require_subcritical=False)
+    assert bool(df_j.loc[0, "valid"]) is False and "unstable" in df_j.loc[0, "reason"]   # Jacobian criterion
     best = select_best(df, "fit_rmse")
     assert best["G"] > 0
     flags = border_flags({"G": 0.5, "a": -0.05, "metric": "fit_rmse"}, df)
@@ -170,3 +172,23 @@ def test_validated_used_falls_back_when_unstable(truth):
     a_fn = lambda b: -0.1 + b * z  # noqa: E731
     assert _validated_used("linear", {"G": 1.0, "a": 0.02, "source": "continuous (lbfgs)"}, {"G": 1.0, "a": 0.0}, t["SC"], t["omega"], a_fn, info)["a"] == 0.02
     assert _validated_used("nonlinear", bad, {"G": 0.9, "a": -0.05}, t["SC"], t["omega"], None, info) is bad
+
+
+def test_subcritical_validity(truth):
+    from hopfec.models.hopf_linear import linear_stability
+    from hopfec.models.search import linear_validity
+
+    t = truth
+    # small positive a at moderate G: the coupled Jacobian is stable, but the point is outside the linear model's regime
+    a_pos = np.full(t["SC"].shape[0], -0.05)
+    a_pos[0] = 0.01
+    assert linear_stability(t["SC"], 1.0, a_pos, t["omega"])["stable"]
+    ok, reason = linear_validity(t["SC"], 1.0, a_pos, t["omega"])
+    assert not ok and "supercritical" in reason
+    assert linear_validity(t["SC"], 1.0, a_pos, t["omega"], require_subcritical=False)[0]
+    assert linear_validity(t["SC"], 1.0, -0.05, t["omega"])[0]
+    df = evaluate_points("linear", [(1.0, -0.05), (1.0, 0.01)], t["SC"], t["omega"], t["emp"], t["tr"], t["band"])
+    assert bool(df.loc[0, "valid"]) and not bool(df.loc[1, "valid"]) and "supercritical" in df.loc[1, "reason"]
+    df2 = evaluate_points("linear", [(1.0, 0.01)], t["SC"], t["omega"], t["emp"], t["tr"], t["band"], require_subcritical=False,
+                          a_fn=lambda v, a_pos=a_pos: a_pos)   # heterogeneous profile: one supercritical node, stable Jacobian
+    assert bool(df2.loc[0, "valid"]) and np.isfinite(df2.loc[0, "fit_rmse"])

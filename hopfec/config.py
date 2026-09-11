@@ -165,6 +165,7 @@ DEFAULTS: dict[str, Any] = {
             "fit_obs_noise": "global",  # whittle: white observation-noise floor global | node | none
             "whittle_n_alias": 1,       # whittle: aliased spectral images included
             "filter_consistent": True,
+            "require_subcritical": True,  # validity: every a_j < 0 (linearisation of the Hopf model); False: stable Jacobian suffices
             "fit_omega": True,          # co-estimate node frequencies (initialised from spectral peaks)
             "fit_a": "none",            # none | global | node
             "lambda_sc": 0.0,           # L2 pull towards the (scaled) structural prior (non-hierarchical fits)

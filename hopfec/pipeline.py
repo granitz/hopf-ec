@@ -294,7 +294,7 @@ def run_search(model: str, SC: np.ndarray, emp: dict, cfg: dict, out_base: Path,
                                      n_sim=int(s.get("n_sim", 1)), seed=int(cfg_get(cfg, "model.nonlinear.seed", 0)),
                                      transient_s=float(m.get("transient_s", 100.0)), filter_consistent=bool(cfg_get(cfg, "model.linear.filter_consistent", True)),
                                      metric=metric, fcd_cfg=m.get("fcd", {}), n_jobs=n_jobs, use_numba=cfg_get(cfg, "model.nonlinear.use_numba", "auto"),
-                                     default_a=_scalar_a(m))
+                                     default_a=_scalar_a(m), require_subcritical=bool(cfg_get(cfg, "model.linear.require_subcritical", True)))
     ensure_dir(out_base.parent)
     df.to_csv(str(out_base) + "_desc-errorsurface_table.tsv", sep="\t", index=False, float_format="%.6g")
     Gs, As, surf = error_surface(df, metric)
@@ -348,6 +348,9 @@ def fit_one(model: str, emp: dict, SC: np.ndarray, G: float, a, cfg: dict, atlas
     band = m.get("filter_band")
     sc_max = float(cfg_get(cfg, "sc.sc_max", 0.2))
     gcfg = m.get("gec", {})
+    if model == "linear" and cfg_get(cfg, "model.linear.require_subcritical", True) and np.any(np.asarray(a, float) >= 0):
+        LOG.warning("linear model fitted with %d supercritical node(s) (a_j >= 0): outside the validity of the linearisation of the Hopf model",
+                    int(np.sum(np.asarray(a, float) >= 0)))
     mask = make_mask(SC, N, gcfg.get("mask", "sc_plus_homotopic"), atlas.homotopic_pairs())
     omega = _omega(emp) if omega_override is None else np.asarray(omega_override, float)
     if model == "nonlinear" or cfg_get(cfg, "model.linear.method", "gradient") == "gec":
@@ -412,40 +415,56 @@ def fit_one(model: str, emp: dict, SC: np.ndarray, G: float, a, cfg: dict, atlas
                         "n_iter": res.n_iter, "best_iter": res.best_iter, "converged": res.converged, "a_fit": None, "omega_fit": omega.tolist()})
     elif model == "nonlinear":
         nc = m.get("nonlinear", {})
-        if C_init is not None:
-            C0 = C_init / max(C_init.max(), 1e-12) * sc_max
-            G_use = float(C_init.max() / sc_max)
-        else:
-            C0 = initial_ec(SC, N, mask, gcfg.get("init", "sc"), sc_max)
-            G_use = float(G)
         n_vol = int(emp.get("n_volumes", 500))
         base_seed = int(nc.get("seed", 0))
-
-        def sim(C, seed=base_seed):  # common random numbers: same seed at every iteration
-            return simulated_moments(C, G_use, a, omega, tr, n_vol, band, tau, beta=beta, dt=float(m.get("dt", 0.1)),
-                                     n_sim=int(nc.get("n_sim", 2)), seed=seed, transient_s=float(m.get("transient_s", 100.0)),
-                                     use_numba=nc.get("use_numba", "auto"))
-
-        nf = noise_floor(lambda C, sd: sim(C, sd), C0, emp["FC"], emp["COVtau"], n_seeds=int(nc.get("n_noise_seeds", 3))) if int(nc.get("n_noise_seeds", 3)) > 0 else {}
         nl_method = str(nc.get("method", "surrogate"))
-        if nl_method == "surrogate":
-            res = fit_nonlinear_surrogate(emp["FC"], emp["COVtau"], C0, sim, mask, G_use, a, omega, tr, tau, beta, band,
-                                          filter_consistent=bool(cfg_get(cfg, "model.linear.filter_consistent", True)),
-                                          max_iter=int(nc.get("max_iter", 300)), patience=int(nc.get("patience", 20)),
-                                          step_frac=float(nc.get("step_frac", 0.05)), normalize_max=sc_max if gcfg.get("normalize_max", True) else None,
-                                          verbose=verbose)
-        else:
-            res = fit_gec(emp["FC"], emp["COVtau"], C0, sim, mask, G=G_use, eps_fc=float(nc.get("eps_fc", 5e-4)), eps_tau=float(nc.get("eps_tau", 5e-4)),
-                          max_iter=int(nc.get("max_iter", 300)), min_iter=int(gcfg.get("min_iter", 20)), patience=int(nc.get("patience", 20)),
-                          normalize_max=sc_max if gcfg.get("normalize_max", True) else None, verbose=verbose,
-                          accept_only_improving=bool(nc.get("accept_only_improving", True)))
-        res.metrics.update(nf)
-        if nf and (res.metrics.get("initial_fit_rmse", np.nan) - res.metrics["fit_rmse"]) < 2 * nf.get("noise_floor_sd", 0.0):
-            res.metrics["improvement_below_noise"] = True
-            LOG.warning("non-linear fit: improvement over the initialisation (%.4f -> %.4f) is within 2 SD of the simulation-noise floor (%.4f); increase nonlinear.n_sim",
-                        res.metrics.get("initial_fit_rmse", np.nan), res.metrics["fit_rmse"], nf["noise_floor_sd"])
-        else:
-            res.metrics["improvement_below_noise"] = False
+
+        def _fit_nl(C0: np.ndarray, G_use: float):
+            def sim(C, seed=base_seed):  # common random numbers: same seed at every iteration
+                return simulated_moments(C, G_use, a, omega, tr, n_vol, band, tau, beta=beta, dt=float(m.get("dt", 0.1)),
+                                         n_sim=int(nc.get("n_sim", 2)), seed=seed, transient_s=float(m.get("transient_s", 100.0)),
+                                         use_numba=nc.get("use_numba", "auto"))
+
+            nf = noise_floor(lambda C, sd: sim(C, sd), C0, emp["FC"], emp["COVtau"], n_seeds=int(nc.get("n_noise_seeds", 3))) if int(nc.get("n_noise_seeds", 3)) > 0 else {}
+            if nl_method == "surrogate":
+                r = fit_nonlinear_surrogate(emp["FC"], emp["COVtau"], C0, sim, mask, G_use, a, omega, tr, tau, beta, band,
+                                            filter_consistent=bool(cfg_get(cfg, "model.linear.filter_consistent", True)),
+                                            max_iter=int(nc.get("max_iter", 300)), patience=int(nc.get("patience", 20)),
+                                            step_frac=float(nc.get("step_frac", 0.05)), normalize_max=sc_max if gcfg.get("normalize_max", True) else None,
+                                            verbose=verbose, tol_rel=float(nc.get("tol_rel", 1e-4)))
+            else:
+                r = fit_gec(emp["FC"], emp["COVtau"], C0, sim, mask, G=G_use, eps_fc=float(nc.get("eps_fc", 5e-4)), eps_tau=float(nc.get("eps_tau", 5e-4)),
+                            max_iter=int(nc.get("max_iter", 300)), min_iter=int(gcfg.get("min_iter", 20)), patience=int(nc.get("patience", 20)),
+                            normalize_max=sc_max if gcfg.get("normalize_max", True) else None, verbose=verbose,
+                            accept_only_improving=bool(nc.get("accept_only_improving", True)))
+            r.metrics.update(nf)
+            r.metrics["improvement_below_noise"] = bool(nf and (r.metrics.get("initial_fit_rmse", np.nan) - r.metrics["fit_rmse"]) < 2 * nf.get("noise_floor_sd", 0.0))
+            if r.metrics["improvement_below_noise"]:
+                LOG.warning("non-linear fit: improvement over the initialisation (%.4f -> %.4f) is within 2 SD of the simulation-noise floor (%.4f); increase nonlinear.n_sim",
+                            r.metrics.get("initial_fit_rmse", np.nan), r.metrics["fit_rmse"], nf["noise_floor_sd"])
+            return r
+
+        # starting points: the linear EC (init: linear), the structural prior (init: sc), or both (kept: the better fit;
+        # the agreement of the two solutions is reported so that initialisation dependence is visible)
+        init_mode = str(nc.get("init", "linear"))
+        starts: list[tuple[str, np.ndarray, float]] = []
+        if C_init is not None:
+            starts.append(("linear", C_init / max(C_init.max(), 1e-12) * sc_max, float(C_init.max() / sc_max)))
+        if C_init is None or init_mode == "both":
+            starts.append(("sc", initial_ec(SC, N, mask, gcfg.get("init", "sc"), sc_max), float(G)))
+        runs = [(name, _fit_nl(C0, G_use), G_use) for name, C0, G_use in starts]
+        name, res, G_use = min(runs, key=lambda r: (r[1].metrics["fit_rmse"] if np.isfinite(r[1].metrics["fit_rmse"]) else np.inf))
+        res.metrics["init_used"] = name
+        if len(runs) > 1:
+            ECs_by = {nm: gu * r.C for nm, r, gu in runs}
+            for nm, r, _ in runs:
+                res.metrics[f"fit_rmse_init_{nm}"] = float(r.metrics["fit_rmse"])
+                res.metrics[f"fc_corr_init_{nm}"] = float(r.metrics["fc_corr"])
+            e1, e2 = ECs_by["linear"][mask], ECs_by["sc"][mask]
+            res.metrics["ec_corr_between_inits"] = float(np.corrcoef(e1, e2)[0, 1]) if e1.std() > 0 and e2.std() > 0 else np.nan
+            res.metrics["ec_rel_diff_between_inits"] = float(np.linalg.norm(e1 - e2) / max(0.5 * (np.linalg.norm(e1) + np.linalg.norm(e2)), 1e-12))
+            LOG.info("non-linear fit from both initialisations: fit_rmse linear-init %.4f, sc-init %.4f; EC agreement r=%.3f (kept: %s)",
+                     res.metrics["fit_rmse_init_linear"], res.metrics["fit_rmse_init_sc"], res.metrics["ec_corr_between_inits"], name)
         EC = G_use * res.C
         out.update({"method": nl_method, "G_used": G_use, "metrics": res.metrics, "history": res.history, "FC_sim": res.FC_sim, "COVtau_sim": res.COVtau_sim,
                     "n_iter": res.n_iter, "best_iter": res.best_iter, "converged": res.converged, "a_fit": None, "omega_fit": omega.tolist()})
@@ -734,7 +753,7 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
                 if G_fixed is None and level in ("participant", "both") and cfg_get(cfg, "model.search.enabled", True):
                     b = run_search(model, s.SC, s.emp, cfg, mdir / s.sub / f"{s.sub}_atlas-{aslug}_model-{tag}", n_jobs, title=f"{model} model, {s.sub}", hetero=hetero)
                     G_s = float(b["G"])
-                use_lin = model == "nonlinear" and cfg_get(cfg, "model.nonlinear.init", "linear") == "linear" and s.sub in linear_results
+                use_lin = model == "nonlinear" and cfg_get(cfg, "model.nonlinear.init", "linear") in ("linear", "both") and s.sub in linear_results
                 C_init = linear_results[s.sub]["EC"] if use_lin else None
                 om_init = linear_results[s.sub].get("omega") if use_lin else None
                 C_prior_s, lam_s = None, None
@@ -780,7 +799,7 @@ def run_fit_stage(cfg: dict, participants: pd.DataFrame, atlas: Atlas, models: l
             savem(Path(str(gbase) + "_desc-empiricalCOVtau_connectivity.tsv"), emp_g["COVtau"])
             entry: dict = {"n": len(members), "members": [s.sub for s in members]}
             if gcfg.get("fit_group_average", True):
-                use_lin = model == "nonlinear" and cfg_get(cfg, "model.nonlinear.init", "linear") == "linear" and gname in linear_group_results
+                use_lin = model == "nonlinear" and cfg_get(cfg, "model.nonlinear.init", "linear") in ("linear", "both") and gname in linear_group_results
                 C_init = linear_group_results[gname]["EC"] if use_lin else None
                 om_init = linear_group_results[gname].get("omega") if use_lin else None
                 res = group_fit_results.get(gname) or fit_one(model, emp_g, SC_g, G_group, a, cfg, atlas, C_init=C_init, verbose=verbose, omega_override=om_init)
